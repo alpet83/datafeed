@@ -179,13 +179,13 @@
             $url = $this->rest_api_url.'/trade/bucketed';
             $per_once = min($per_once, 1500); 
 
-            $params = ['symbol' => $this->symbol, 'binSize' => '1d', 'partial' => 'true', 'reverse' => 'false', 'count' => $per_once];                      
+            $params = ['symbol' => $this->symbol, 'binSize' => '1d', 'partial' => 'false', 'reverse' => 'false', 'count' => $per_once];                      
             $cursor = 0; // is_array($res) ? count($res) - 1 : 0;            
 
             $json = 'fail';                        
             $table_name = "{$this->table_name}__1D";
             if (is_array($stored))
-                $cursor = count($stored) - 1; // not request all
+                $cursor = count($stored) - 7; // not request all, update single week
             else
                 $stored = [];
 

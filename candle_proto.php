@@ -98,6 +98,8 @@
 
         public function SetRow(mixed $key, array $row): int {                   
             verify_timestamp($key, 'CandlesCache->SetRow');
+            $key = floor($key / $this->interval) * $this->interval; 
+            
             if (isset($this->cache_map[$key])) $this->duplicates ++;   
             if ($this->interval < SECONDS_PER_DAY && count($row) < 6)
                 $row []= $this->mark_flags; // flags
@@ -416,9 +418,10 @@
             // пороговое значение 0.1%, т.к. текстовые данные с преобразованием в float могут накопить погрешность
             $msg = '';
             $tmp_dir = $this->manager->tmp_dir.'/blocks'; 
+            $loaded = count($block);
             check_mkdir($tmp_dir);
 
-            if ( abs($vdiff) < $block->target_volume * 0.001 || -1 == $block->index ) 
+            if ( abs($vdiff) < $block->target_volume * 0.001 || -1 == $block->index && $loaded <= 1440) 
                 $msg = format_color("$prefix($symbol/$index):~C00 %s, lag left %d, summary volume = target %s, filled in session %d: %s ", 
                             strval($block), $lag_left, $block->info, format_qty($volume), 
                             $block->fills, $filled);       
@@ -428,14 +431,14 @@
                 
                 $last = $block->last() ?? [];
                 
-                $msg = format_color("~C103~C31 #BLOCK_COMPLETE_WARN($symbol/$index): ~C00 %s have target volume %s != calculated %s (diff %s), daily close = %.5f and last candle close = %s:%.5f, loaded %d", 
+                $msg = format_color("~C103~C31 #BLOCK_COMPLETE_WARN($symbol/$index): ~C00 %s have target volume %s vs calculated %s (diff %s), daily close = %.5f and last candle close = %s:%.5f, loaded %d", 
                                 strval($block),
                                 format_qty($block->target_volume),  format_qty($volume), format_qty($vdiff),
                                 $day_close,
-                                color_ts($ltk), $last[CANDLE_CLOSE] ?? 0, count($block));                                         
+                                color_ts($ltk), $last[CANDLE_CLOSE] ?? 0, $loaded);                                         
                 $dump = [];
                 foreach ($block->Export(0.000001) as $tk => $rec) 
-                    $dump [format_ts($tk)] = json_encode($rec);
+                    $dump [] = format_ts($tk).' = '.json_encode($rec);
                 $dump []= 'VOLUME ROW: '.json_encode($block->saldo_source);
                 $dump []= "VOLUME DIFF: expected {$block->target_volume}, achieved $volume, diff = ".format_qty($vdiff);
                 $dump []= '';
