@@ -1,0 +1,330 @@
+#!/usr/bin/php
+<?php
+    $last_exception = null;
+
+    ob_implicit_flush();
+    set_include_path(".:./lib:/usr/sbin/lib");
+    require_once "common.php";
+    require_once 'esctext.php';
+    require_once "db_tools.php";
+    require_once "lib/db_config.php";
+    include_once "clickhouse.php";
+    require_once "rate_limiter.php";
+    require_once "candle_proto.php";
+    require_once "bfx_websocket.php";
+    require_once "proto_manager.php";
+    require_once "bfx_dm.php";
+    require_once 'vendor/autoload.php';
+
+
+    echo "<pre>\n";
+    $tmp_dir = '/tmp/bfx';
+
+    define('REST_ALLOWED_FILE', $tmp_dir.'/rest_allowed.ts');
+    $log_stdout = true;
+    $verbose = 3;
+    $rest_allowed_t = time();
+    if (file_exists(REST_ALLOWED_FILE)) {
+        $rest_allowed_t = file_get_contents(REST_ALLOWED_FILE);
+        log_cmsg("#DBG: RestAPI allowed after %s", gmdate(SQL_TIMESTAMP, $rest_allowed_t));    
+        while (time() < $rest_allowed_t) {
+            $elps = $rest_allowed_t - time();
+            log_cmsg("#WARN: start will be delayed for $elps seconds, due RestAPI BAN applied");
+            flush();
+            set_time_limit(60);      
+            sleep(30);
+        }
+    }    
+
+    file_put_contents($tmp_dir.'/candle_dl.ts', date(SQL_TIMESTAMP));     
+    error_reporting(E_ERROR | E_WARNING | E_PARSE);    
+    mysqli_report(MYSQLI_REPORT_ERROR);  
+    
+    ini_set('display_errors', true);
+    ini_set('display_startup_errors', true);
+    $manager = false;   
+
+    class BitfinexCandleDownloader 
+        extends CandleDownloader {    
+       
+
+        public   function   __construct(BitfinexDownloadManager $mngr, stdClass $ti) {
+            parent::__construct($mngr, $ti);
+            $this->CreateTables();
+            $this->RegisterSymbol('candles', $this->pair_id);
+            if (strpos($this->symbol, 'BTC') || strpos($this->symbol, 'ETH'))
+                $this->normal_delay = 30; 
+            $this->blocks_at_once = 2;
+        } // constructor
+ 
+
+        public   function    ImportCandles(array $data, string $source,  bool $direct_sync = true): ?CandlesCache {
+            global $verbose;            
+            if (!is_array($data)) {
+                log_cmsg("~C91 #WARN:~C00 decode failed for json data, type = %s? ", gettype($data));
+                return null;
+            }
+
+            if ($this->manager->VerifyRow($data)) {
+                log_cmsg("~C91 #STRANGE:~C00 directly single row %s passed from %s ", json_encode($data), format_backtrace());                
+                $data = [$data];
+            }
+
+            $mgr = $this->get_manager();
+            $this->last_cycle = $mgr->cycles;
+
+            $result = new CandlesCache($this);;      
+            $result->interval = $this->current_interval;          
+
+            $now = time_ms();
+            $cnt = 0;            
+            $checked = 0;
+            $updated = 0;            
+            $row = [];
+            $errs = [];
+            $block = $this->last_block;
+
+
+            foreach ($data as $row) {
+                if (isset($row[0]) && is_int($row[0])) 
+                    $checked ++;
+                else  {
+                    log_cmsg("~C91#WRONG_ROW:~C00 %s from %s", json_encode($row), format_backtrace());
+                    break;
+                }
+
+                $tk_ms = array_shift($row) * 1;
+                $tk = $tk_ms / 1000;
+                if ($tk_ms >= $now + 1000) {
+                    log_cmsg("~C91 #REJECT:~C00 attempt import candle from future %s", date_ms(SQL_TIMESTAMP3, $tk_ms));
+                    continue;
+                }          
+                $this->first_ts = 0 == $this->first_ts ? $tk_ms : min($this->first_ts, $tk_ms);          
+                $this->newest_ms = max($this->newest_ms, $tk_ms);
+
+                $tk = floor($tk / 60) * 60; // round to minutes, for using as key
+                if (isset($result[$tk]))                                         
+                    $updated ++;                
+                else
+                    $cnt ++; // detect adding new
+                $row = $this->CheckCandle($tk, $row, $errs); 
+                $result[$tk] = $row;                    
+            }                                    
+            $result->OnUpdate();
+
+            if ('WebSocket' == $source && !$direct_sync) {
+                log_cmsg("~C91 #WARN:~C00 indirect import realtime data from %s", debug_backtrace());
+                $direct_sync = true;
+            }
+
+            if (count($result) > 0 && $direct_sync) {
+                $result->Store($block);
+                $cnt = $this->SaveToDB($result, false);           
+            }
+            
+
+            $target = $direct_sync ? $this->table_name : 'cache';
+            if ($cnt + $updated > 0 && $verbose >= 3)
+                log_cmsg("... into %s $target inserted %d, updated %d, from %d rows, total %.2fK candles, newest = %s, from %s",
+                            $this->ticker, $cnt, $updated, $checked, count($result) / 1000.0,  format_tms($this->newest_ms), $source);
+
+            return $result;
+        }             
+     
+         // ImportCandles         
+
+        public function LoadCandles(DataBlock $block, string $ts_from, bool $backward_scan = true, int $limit = 5 * 24 * 60): ?array {
+            $url = $this->rest_api_url;              
+            if ($block->recovery && 1 == $this->days_per_block && $this->current_interval < SECONDS_PER_DAY)
+                $limit = min(1600, $limit);
+            $params = ['limit' => $limit, 'sort' => $backward_scan ? -1 : 1];
+            $path = "candles/trade:1m:{$this->symbol}/";            
+            if ($this->is_funding)
+                $path = "candles/trade:1m:{$this->symbol}:p30/";                 
+            $path .= 'hist'; //
+            $tkey = $backward_scan ? 'end' : 'start';              
+            $params[$tkey] = strtotime_ms($ts_from);   // in ms 
+            $res = $this->LoadData($block, $url.$path, $params, $ts_from, $backward_scan);                                    
+            return $res;
+        }
+
+        public function LoadDailyCandles(int $per_once = 1000, bool $from_DB = true): ?array { 
+            $res = parent::LoadDailyCandles($per_once, $from_DB); // used for limiting
+            // if (is_array($res) && count($res) > 0)  return $res;
+            $this->SaveToDB($this->cache); // flush cache before filling            
+            $url = $this->rest_api_url."candles/trade:1D:{$this->symbol}/hist";  
+            $params = ['limit' => $per_once, 'sort' => 1];                 
+            $cursor = EXCHANGE_START_SEC;
+            if (is_array($res) && count($res) > 0) {
+                $cursor = array_key_last($res);
+                $cursor -= SECONDS_PER_DAY;                
+            }            
+
+            $json = 'fail';            
+            $table_name = $this->table_name.'__1D';
+
+            $orig_table = $this->table_name;
+            $map = [];
+            try {
+                $this->table_name = $table_name;
+                $this->current_interval = SECONDS_PER_DAY;
+                if (!$this->CreateTables())
+                    throw new Exception("~C91#ERROR:~C00 failed create table %s", $this->table_name);
+                log_cmsg("~C93 #LOAD_DAILY:~C00 requesting daily candles for %s from exchange", $this->symbol);
+                $attempts = 10;
+                $candles = new CandlesCache($this); 
+
+                while ($attempts -- > 0) {
+                    $params['start'] = $cursor * 1000; // param in ms
+                    $json = $this->api_request($url, $params);
+                    $data = json_decode($json);
+                    if (!is_array($data) || count($data) == 0) break;
+                    $part = $this->ImportCandles($data, 'REST-API-1D', false);                                    
+                    $imp = count($part);                          
+                    if ($imp > 0) {              
+                        $part->Store($candles);       
+                        $this->SaveToDB($part, true);                    
+                        $candles->OnUpdate();
+                        $cursor = $candles->lastKey() + SECONDS_PER_DAY; // timestamp of latest
+                    }                        
+                    if (time() - $cursor <= SECONDS_PER_DAY) break;    
+                    if ($imp < $this->default_limit) break;            
+                }            
+                
+                if (0 == count($candles)) 
+                    log_cmsg("~C91#ERROR:~C00 failed load daily candles via %s, response = %s", 
+                                $this->last_api_request, substr($json, 0, 100));                                
+                else  {
+                    $map = array_replace($res, $candles->Export());
+                    
+                    $ft = $candles->firstKey();
+                    $first = $candles->first();
+                    log_cmsg("~C92#SUCCESS:~C00 loaded %d daily candles, trying save to %s, first %s : %s", 
+                                count($candles), $this->table_name, color_ts($ft), json_encode($first) );                
+                }
+            } 
+            finally {
+                $this->table_name = $orig_table;             
+                $this->current_interval = 60;
+            }           
+            $tmp_dir = $this->get_manager()->tmp_dir;
+            file_save_json("$tmp_dir/{$this->symbol}_candles_1d.json", $map);
+            return $map;
+        }
+        
+    } // class BitfinexCandleDownloader
+
+    class  CandleDownloadManager
+      extends BitfinexDownloadManager {
+        public function __construct($symbol) {
+            $this->ws_data_kind = 'trade:1m';
+            $this->ws_channel = 'candles';
+            $this->loader_class = 'BitfinexCandleDownloader';            
+            parent::__construct($symbol, 'candles');                                  
+        } // constructor       
+
+        protected function SelfCheck(): bool {
+            global $mysqli_df, $mysqli;
+            $mysqli_df = $mysqli = sqli();
+            $replica = is_object($mysqli) ? $mysqli->replica : null;
+            $elps = time() - $this->last_db_reconnect;
+
+            if (!$mysqli || !$mysqli->ping()) {
+                log_cmsg("~C91 #FAILED:~C00 connection to DB is lost, trying reconnect...");
+                $mysqli_df = $mysqli = init_remote_db(DB_NAME);                
+                $this->last_db_reconnect = time();
+                if (!$mysqli_df) {
+                    sleep(30);
+                    return false;
+                }                
+            }    
+
+            if (!is_object($replica) || !$replica->ping()) {                
+                if ($elps > 60) {  // not to frequent                    
+                    log_cmsg("~C31 #WARN:~C00 replication DB connection is lost, trying reconnect...");
+                    $replica = init_replica_db(DB_NAME);
+                    $this->last_db_reconnect = time();
+                }
+                else    
+                    $replica = null;
+            }
+            $mysqli->replica = is_object($replica) ? $replica : null;   
+            return true;
+        }
+
+               
+        protected function Loader(int $index): ?BitfinexCandleDownloader {
+            return $this->loaders[$index];
+        }
+        
+        protected function SubscribeWS() {
+            $keys =  array_keys($this->loaders);
+            foreach ($keys as $pair_id) {        
+                
+                $downloader = $this->Loader ($pair_id);                
+                $key = "{$this->ws_data_kind}:{$downloader->symbol}";
+                $params = ['key' => $key];
+                log_cmsg("~C97 #WS_SUB~C00: symbol = %s", $downloader->symbol);
+                if ($this->ws instanceof BitfinexClient)
+                    $this->ws->subscribe('candles', $params);
+            }
+        } // function SubscribeWS        
+
+        public function VerifyRow(mixed $row): bool {
+            // MTS is int,   open, close, high, low, volume are float
+            return is_array($row) && count($row) == 6 && is_int($row[0]) && is_numeric($row[4]); // MTS is int
+        }
+    }
+
+
+    $ts_start = pr_time();
+    echo ".";
+
+    date_default_timezone_set('UTC');
+    set_time_limit(15);    
+    
+    $db_name_active = 'nope'; 
+    $symbol = 'all';
+
+    if ($argc && isset($argv[1])) {
+      $symbol = $argv[1];
+      if (isset($argv[2]))
+          $verbose = $argv[2];
+    }  
+    else
+      $symbol = rqs_param("symbol", 'all');         
+
+    $pid_file = sprintf($tmp_dir.'/candle_dl@%s.pid', $symbol);
+    $pid_fd = setup_pid_file($pid_file, 300);        
+    $hour = date('H');
+    $log_name = sprintf('/logs/bfx_candle_dl@%s-%d.log', $symbol, $hour); // 24 logs rotation
+    $log_file = fopen(__DIR__.$log_name, 'w');
+    flock($log_file, LOCK_EX);
+    echo ".\n";
+    log_cmsg("~C97 #START:~C00 trying connect to DB %s...", DB_NAME);
+
+    $mysqli_df = $mysqli = init_remote_db(DB_NAME);
+    if (!$mysqli) {
+        log_cmsg("~C91 #FATAL:~C00 cannot initialze DB interface! ");
+        die("ooops...\n");
+    }   
+
+    $chdb = false;
+    $pid = shell_exec('pidof clickhouse-server');
+    if (strlen($pid) > 1 && is_integer($pid) || !str_in(CLICKHOUSE_HOST, '127.0.0.1'))
+        $chdb = ClickHouseConnect(CLICKHOUSE_USER, CLICKHOUSE_PASS, DB_NAME);
+
+    $mysqli->try_query("SET time_zone = '+0:00'");
+    $mysqli->replica = init_replica_db(DB_NAME);
+    log_cmsg("~C93 #START:~C00 connected to~C92 localhost@$db_name_active~C00 MySQL, ClickHouse [$pid] = ".is_object($chdb)); 
+    $elps = -1;  
+    $hstart = floor(time() / 3600) * 3600;
+    $manager = new CandleDownloadManager($symbol);
+    main($manager);    
+    fclose($log_file);
+    flock($pid_fd, LOCK_UN);
+    fclose($pid_fd);  
+    system("bzip2 -f --best $log_name");
+    $log_file = false;
+    unlink($pid_file);
+?>
