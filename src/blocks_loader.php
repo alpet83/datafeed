@@ -609,6 +609,7 @@ SKIP_CHECKS:
 
                     $mini_cache = null;
                     $prev_count = count($block);
+                    $prev_dups = $block->duplicates;
                     $imp = 0;                        
 
                     if (is_array($data) && count($data) > 0) {
@@ -621,19 +622,22 @@ SKIP_CHECKS:
                             throw new ErrorException("FATAL: method $method not found in ".get_class($this));
                     }
 
+                    $count_diff = 0;
+                    $dups_diff = 0;
                     if (is_object($mini_cache)) { 
                         $imp = count($mini_cache);    
                         $added += $imp;                                            
                         $mini_cache->Store($this->cache);                         
                         $this->OnCacheUpdate($block, $cache); // раздача данных всем блокам, включая текущий                         
+                        $count_diff = count($block) - $prev_count;
+                        $dups_diff = $block->duplicates - $prev_dups;
                         if (BLOCK_CODE::FULL == $block->code) {
                             $this->OnBlockComplete($block);
                             break; // больше нечего тут делать, при обработке кэша все решилось
                         }
 
                         $cache_size = count($cache); // integraded with last                    
-
-                        if (count($data) > $cache_size && $index >= 0) {
+                        if (count($data) > $cache_size + 10 && $index >= 0) {
                             // it may be ignorable only rows
                             $first = $last = null;
                             if ($imp > 0) {
@@ -642,17 +646,15 @@ SKIP_CHECKS:
                                 $first = $data[$first]; 
                                 $last = $data[$last];
                             }                            
-                            log_cmsg("~C91#WARN_LOSS:~C00 for block %s imported/saved only %d $data_name from %d, in cache now %d. First loaded: %s, imported: %s",
-                                        $block_id, $imp, count($data), $cache_size,
+                            log_cmsg("~C91#WARN_LOSS:~C00 imported/saved only %d $data_name from %d, in cache now %d. First loaded: %s, imported: %s",
+                                        $imp, count($data), $cache_size,
                                         json_encode($data[0] ?? $data),
                                         json_encode($first), json_encode($last) );                                
                         }
                         $oldest_ms = $mini_cache->oldest_ms();                         
                         $newest_ms = $mini_cache->newest_ms();
                         $key_first = $cache->firstKey();
-                        $key_last = $cache->lastKey();
-
-                        $count_diff = count($block) - $prev_count;
+                        $key_last = $cache->lastKey();                        
 
                         if ($block->recovery && 0 == count($block)) {  // по логике запроса таких блоков, хотя-бы одна запись должна быть загружена, иначе в его временном диапазоне вакуум                       
                             $first_keys = array_slice($mini_cache->keys, 0, 5);
@@ -663,25 +665,25 @@ SKIP_CHECKS:
                             // die("DEBUG BREAK\n");
                             $block->code = BLOCK_CODE::INVALID;
                             break;    
-                        } elseif ($prev_count == $block->fills && $imp > 0) {
-                            log_cmsg("~C31 #NO_DATA_COVERED:~C00 %d downloaded records have timestamps out of block, records accumulated %d, key range [%s..%s]",
-                                        $imp, $prev_count, var_export($key_first, true), var_export($key_last, true));
+                        } elseif (0 == $count_diff && 0 == $dups_diff && $imp > 0 && $block->code !== BLOCK_CODE::FULL) {
+                            log_cmsg("~C31 #NO_UPDATES:~C00 %d downloaded records have timestamps out of block %s volume %s, records accumulated %d, key range [%s..%s]",
+                                        $imp, strval($block), format_qty($block->SaldoVolume()), $prev_count,
+                                        var_export($key_first, true), var_export($key_last, true));
                             if ($reverse)
                                 $block->attempts_bwd ++;
                             else
                                 $block->attempts_fwd ++;
                         }                    
-
-                        // подразумевается, что в кэше не застревают данные последнего блока, вообще не появляются 
-                        if ($block->min_avail < $prev_avail_min)                                             
-                            log_cmsg("~C97 #BLOCK_FILLS_LEFT:~C00 was %s now %s, +filled %d ", color_ts($block->min_avail), color_ts($prev_avail_min), $count_diff);                                                
-                        if ($block->max_avail > $prev_avail_max)                                             
-                            log_cmsg("~C97 #BLOCK_FILLS_RIGHT:~C00 was %s now %s, +filled %d ", color_ts($block->max_avail), color_ts($prev_avail_max), $count_diff);                                                
-
-                        
+                        elseif($count_diff > 0) {
+                            // подразумевается, что в кэше не застревают данные последнего блока, вообще не появляются 
+                            if ($block->min_avail < $prev_avail_min)                                             
+                                log_cmsg("~C97 #BLOCK_FILLS_LEFT:~C00 was %s now %s, +filled %d ", color_ts($block->min_avail), color_ts($prev_avail_min), $count_diff);                                                
+                            if ($block->max_avail > $prev_avail_max)                                             
+                                log_cmsg("~C97 #BLOCK_FILLS_RIGHT:~C00 was %s now %s, +filled %d ", color_ts($block->max_avail), color_ts($prev_avail_max), $count_diff);                                                
+                        }                        
                         
                         if ($before_ms < EXCHANGE_START || $oldest_ms < EXCHANGE_START)                              
-                        log_cmsg("~C91 #ERROR:~C00 outbound oldest value select from  %s / %s / %s ",
+                            log_cmsg("~C91 #ERROR:~C00 outbound oldest value select from  %s / %s / %s ",
                                     format_tms($this->oldest_ms), format_tms($before_ms), format_tms($oldest_ms));
                         
                         $before_ms = min($before_ms, $oldest_ms);                                   
@@ -691,18 +693,18 @@ SKIP_CHECKS:
                         $head_cover = $this->oldest_ms <= $lbound_ms;
                         $tail_cover = $newest_ms >= ($block->rbound_ms - 1000);
 
-                        $lag_left = $block->min_avail - $block->lbound;
-                        $lag_right = $block->rbound - $block->max_avail;
+                        $lag_left = $block->VoidLeft();
+                        $lag_right = $block->VoidRight();
 
                         if ($head_cover && $tail_cover ||                            
                             $block->attempts_bwd >= 5 || $block->attempts_fwd >= 5) {
                             $block->code = BLOCK_CODE::FULL;                                            
                             $block->info = 'cache covers block';
                         }
-                        elseif ($block->fills > 0) 
+                        elseif ($block->fills > 0 && BLOCK_CODE::NOT_LOADED == $block->code) 
                             $block->code = BLOCK_CODE::PARTIAL;       
 
-                        if ($reverse && $lag_left < 300 && $lag_right < 3600  || ($lag_right < 3600 && $lag_left < 3600 &&  $block->attempts_bwd++ > 2) )  {
+                        if ($reverse && $block->IsFullFilled()  || !$reverse && ($lag_right < 3600 && $lag_left < 3600 &&  $block->attempts_bwd++ > 2) )  {
                             // log_cmsg("~C97#AUTO_COMPLETION:~C00 small lags %d <-> %d ", $lag_left, $lag_right);
                             $block->code = BLOCK_CODE::FULL;
                             $block->info = 'both lags to small';
@@ -730,11 +732,9 @@ SKIP_CHECKS:
                     }
 
                     $this->loops ++;                                                         
-                    if (BLOCK_CODE::FULL == $block->code || BLOCK_CODE::VOID == $block->code) {                                        
-                        $this->OnBlockComplete($block);                    
+                    if (BLOCK_CODE::FULL == $block->code || BLOCK_CODE::VOID == $block->code) {                                                                
                         break;                                       
                     } 
-
                     $mgr->ProcessWS(false); // обновления мимо кэша!
                     
                     $last_ts = '';
@@ -915,7 +915,7 @@ SKIP_CHECKS:
             $minute = date('i');            
             if (0 == $n_blocks && ($mgr->cycles < 10 || 0 == $minute % 5)) {                
                 if (0 == $this->loaded_blocks && $mgr->cycles < 30)
-                    log_cmsg("~C31#REST_DOWNLOAD:~C00 too small blocks to download for %s, head loaded = %s; scaning...", $this->ticker, $this->head_loaded ? 'yep' : '~C31nope');                    
+                    log_cmsg("~C34#REST_DOWNLOAD:~C00 too small blocks to download for %s, head loaded = %s; scaning...", $this->ticker, $this->head_loaded ? 'yep' : '~C31nope');                    
                 $this->PrepareDownload();
                 $n_blocks = count($this->blocks);
                              
@@ -1019,17 +1019,24 @@ SKIP_CHECKS:
                         $failed ++;
                     }
                 }  
-                else  {                     
-                    $code_map[$key] ++;
-                    unset($this->blocks[$index]); // remove loaded block
-                    $removed ++;
-                }
+                else                       
+                    $code_map[$key] ++;                    
+                
                 $index --;        
-
                 $elps = time() - $t_start;
                 if ($elps >= $this->cycle_time * 0.75 || str_in($this->last_error, 'timeouted')) break;
                 if ($minute >= 58) break; // last minutes = minimal work
             } // while - loading blocks one by one
+
+            $blocks = array_reverse($this->blocks);
+
+            foreach ($blocks as $block) 
+                if ($block->Finished()) {
+                    $this->OnBlockComplete($block);    
+                    unset($this->blocks[$block->index]); 
+                    unset($this->blocks_map[$block->key]);
+                    $removed ++;                
+                }
 
             $cache_size = count($this->cache);
             if ($cache_size > 0) {                

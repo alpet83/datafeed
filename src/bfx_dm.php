@@ -1,4 +1,6 @@
 <?php
+
+use Dom\Element;
     require_once "proto_manager.php";
 
 
@@ -30,9 +32,9 @@
         }     
         
 
-        protected function ImportUpdateWS(mixed $data, string $context): int  {
+        protected function ImportUpdateWS(mixed $data, string $context): int  {            
             if (is_string($data[1]) && 'hb' != $data[1]) 
-                log_cmsg("~C94#WS_UPDATE:~C00 %s", $data[1]);
+                log_cmsg("~C94#WS_UPDATE:~C00 %s", $data[1]);            
             return 0;
         }
 
@@ -44,7 +46,13 @@
                 log_cmsg("~C94#WS_IGNORE:~C00 not subscribed for data id = %s ", $id); 
                 return 0; // another data?
             }
-            $multi = $data[1];
+
+            $multi = $data[1];           
+
+            $saver = 0 == $this->ws_recv_packets % 500 ? 'file_put_contents' : 'file_add_contents';
+            $log_name = "{$this->tmp_dir}/ws_data_{$this->ws_data_kind}.log";
+            $saver ($log_name, tss().' = '.json_encode($data). "\n");
+
             if (is_string($multi))
                 return $this->ImportUpdateWS($data, $context); // heartbeat info or updates
 
@@ -53,36 +61,32 @@
             if (!$downloader) {
                 log_cmsg("~C91#WS_UNKNOWN:~C00 symbol %s ", $symbol); 
                 return 0 ;  // WTF???
-            }
-           
+            }           
             
-            $imported = 0;
-            $single_row = false;
+            $imported = 0;            
+            $type = 'update';
             // recheck first row is compat
-            if (is_array($multi))  {
+            if (is_array($multi) && isset($multi[0]))  {
                 $inserted = 0;
-                if (1 == count($multi)) {  // have signle array of rows inside array
-                    $rows = $multi[0];
-                    if (is_array($rows) && isset($rows[0]) && is_array($rows[0]) && $this->VerifyRow($rows[0]))
-                        $multi = $rows;
-                    elseif (count ($rows) <= 6)
-                        print_r($rows); // single item?
-                }
-                elseif ($this->VerifyRow($multi)) {
-                    $single_row = true;
-                    $multi = [$multi]; // single row at once
-                }
+                $test = $multi[0]; // first record of snapshot or MTS field of first record
+                if ($this->VerifyRow($test)) {                    
+                    $type = 'snapshot:'.count($multi);
+                }                    
+                elseif ($this->VerifyRow($multi)) {                    
+                    $multi = [$multi]; // update mode (for candles)
+                } 
+                else 
+                    log_cmsg("~C31 #WS_WARN_UNDETECTED:~C00 first %s: %s", gettype($test), json_encode($test));                 
 
-                $imported = $downloader->ImportWS($multi, ''); // directly to DB
-                // count($ticks);
+                
+                $imported = $downloader->ImportWS($multi, "-$type"); // directly to DB                
                 if ($imported > 0) {                    
                     $downloader->ws_loads += $imported;
                     $downloader->ws_time_last = time();
-                } else {
-                    $is_row = $single_row ? 'single row' : 'multiple rows';
+                } else {                    
                     $dump = json_encode($multi);
                     $dump = substr($dump, 0, 1000). '...';
-                    log_cmsg("~C94#WS_SKIPPED:~C00 symbol %s %s $is_row count = %d, dump start: %s", 
+                    log_cmsg("~C94#WS_SKIPPED:~C00 symbol %s %s $type count = %d, dump start: %s", 
                         $symbol, gettype($multi), count($multi), $dump);  
                 }
 
@@ -97,7 +101,7 @@
         } // function ImportDataWS
 
         
-        protected function on_ws_event($event, $data) {
+        protected function on_ws_event(string $event, mixed $data) {
             if ('subscribed' == $event) {
                 $id = $data->chanId;
                 if (isset($data->key))
@@ -105,13 +109,25 @@
                 elseif (isset($data->symbol)) 
                     $this->subs_map[$id] = $data->symbol; // for trades and ticker
 
-                log_cmsg("~C97 #WS_SUBCRIBE:~C00 confirmed for %s @ #%d \n", $this->subs_map[$id], $id);
+                $sym = $this->subs_map[$id];
+                $loader = $this->GetLoader($sym);        
+                if (is_object($loader)) {
+                    $loader->ws_sub = true;
+                    log_cmsg("~C97 #WS_SUBCRIBE:~C00 confirmed for %s @ #%d \n", $sym, $id);
+                }
+                else    
+                    log_cmsg("~C31 #WS_SUBCRIBE_UNKNOWN:~C00 confirmed for %s @ #%d \n", $sym, $id);
             } // on subscribe
-            if ('info' == $event && isset($data->platform)) {
+            elseif ('info' == $event && isset($data->platform)) {
                 log_cmsg("~C97 #WS_CONNECT~C00: %s", print_r($event, true));
-                if (1 == $data->platform->status)
+                $this->platform_status = $data->platform->status;                
+                if (1 == $data->platform->status) {
+                    $this->ws_active = true;
                     $this->SubscribeWS();
+                }
             }
+            else
+                log_cmsg("~C94 #WS_EVENT:~C00 %s: %s", $event, print_r($data, true));
         } // function on_ws_event
 
     }

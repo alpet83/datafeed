@@ -14,17 +14,17 @@
     function usefull_wait(int $us) {
         global $manager;
         $start = time_us();
-        $ns_wait = 5000000;
+        $ns_wait = min($us, 25000) * 1000; // 25000us = 25ms
 
         if (is_object($manager)) {
             $elps = 0;
             $limit = 1 + $us / 100000; // estimated 0.1 sec for cycle
             for ($i = 0; $i < $limit; $i++) {
                 $manager->ProcessWS(false);
-                $elps = time_us() - $start; // ms to us
+                $elps = time_us() - $start; // ms to us                
                 if ($elps >= $us) break;
                 $info = [];                
-                pcntl_sigtimedwait([SIGQUIT, SIGTERM], $info, 0, $ns_wait);                
+                pcntl_sigtimedwait([SIGQUIT, SIGTERM], $info, 0, $ns_wait);  // real delay                              
             }      
             if ($elps < $us)
                 usleep($us - $elps);
@@ -99,6 +99,7 @@
         protected   $subs_map   = [];
         protected   $ws = false;
 
+        protected   $ws_active = false;
         protected   $ws_imports  = 0;
         protected   $ws_events_cnt = 0;           // simple counter
         protected   $ws_reconnects = 0;
@@ -110,7 +111,7 @@
 
         protected   $ws_connect_t = 0;
         private     $ws_report_t = 0;        
-        protected  $ws_stats = [];      // map of events or data counters
+        protected   $ws_stats = [];      // map of events or data counters
         protected   $ws_sub_started = [];  // map [pair_id] = timestamp, for timeout control
 
         protected   $loader_class = 'BadLoaderException';
@@ -148,6 +149,9 @@
             $this->create_t = time();                 
             $db_name = sqli()->query("SELECT DATABASE()")->fetch_column(0);
             $this->common_db =  'datafeed' == $db_name;            
+            if ($this->common_db)
+                log_cmsg("~C31#WARN:~C00 using common config DB");
+
             foreach (['ticker_map', 'data_config'] as $suffix)
                 if (!isset($this->tables[$suffix])) 
                     $this->tables[$suffix] = $this->TableName($suffix);                
@@ -268,15 +272,20 @@
         } // function LoadSymbols
 
         protected function ReconnectWS($reason) {
-            if (!$this->GetRTMLoaders()) return;
+            $loaders = $this->GetRTMLoaders();
+            if (0 == count($loaders)) return;
             $elps = time() - $this->ws_connect_t;
             if ($elps < 100)  return;           
-
-            log_cmsg("~C91 #WARN:~C00 WebSocket reconnect due %s", $reason);
+            $this->ws_connect_t = time();
+            log_cmsg("~C91 #WS_WARN:~C00 WebSocket reconnect due %s, realtime loaders %d", $reason, count($loaders));
             $this->ws_reconnects ++;
-            $this->ws->reconnect();
+            if (5 == $this->ws_reconnects % 10) 
+                $this->CreateWebsocket();
+            else
+                $this->ws->reconnect();
             $this->subs_map = [];
             $this->platform_status = -1; // means unknown
+            $this->ready_subscribe = time() + 10;
             foreach ($this->loaders as $loader)
                 if (is_object($loader)) {                
                     $loader->ws_channel = 0;
@@ -378,7 +387,7 @@
             $minute_i = floor($minute);            
             if ($minute_i != $this->minute) {
                 $this->minute = $minute_i;
-                log_cmsg("~C92#ALIVE~C00(%d): cycles %5d, scheduled for history download %3d blocks for %3d tickers, full loaded %3d / %3d loaders; WebSocket lag = %d, elps = %d seconds, reconnects = %d", 
+                log_cmsg("~C92#ALIVE~C00(%d): cycles %5d, scheduled for history download %3d blocks for %3d tickers, full loaded %3d / %3d loaders; WebSocket ping elps = %d, elps = %d seconds, reconnects = %d", 
                             getmypid(), $this->cycles, $total_blocks, count($keys), $full_loaded, count($this->loaders), $ws_lag, $ws_elps, $this->ws_reconnects);         
                 $ots_dump = array_map('format_tms', $ots_map);
                 log_cmsg('~C93#DBG:~C00 oldest sequence %s', implode(', ', $ots_dump));
@@ -401,7 +410,7 @@
                     unset($this->ws_sub_started[$pair_id]);
                 }
             }
-            if ($failed_sub > 0)
+            if ($failed_sub > 0 && $this->ws_active)
                 $this->SubscribeWS(); // try to re-subscribe
             usefull_wait(1000000);
         }
@@ -435,16 +444,23 @@
 
 
         protected function LoadPacketWS(): int {  
-            $trecv = 0;       
+            $trecv = 0;                   
             if (!$this->ws) return 0;
+
+            $uptime = time() - $this->create_t;
 
             foreach ($this->loaders as $loader) 
                 if (is_object($loader))
                     $trecv = max ($trecv, $loader->ws_time_last);
                 
             $elps = time() - $trecv;
+
+
             if ($trecv > 0 && $elps > 300) {         
-                $this->ReconnectWS("last recieve age $trecv sec.");
+                if ($elps > SECONDS_PER_DAY)
+                    $elps = '~C31never~C00';
+
+                $this->ReconnectWS("last recieve age $elps ".color_ts($trecv));
                 return 0;
             }
 
@@ -492,8 +508,11 @@
                         log_cmsg("~C96#PERF_WS:~C00 packets:%d, data:%.3fMiB ", $this->ws_recv_packets, $this->ws_recv_bytes / 1048576);
                     return 1;
                 }   
-                elseif ($recv == 'pong' )                     
+                elseif ($recv == 'pong' ) {                     
                     $this->ws_stats ['pong'] = ($this->ws_stats ['pong'] ?? 1) + 1; 
+                    if ($uptime < 180)
+                        log_cmsg("~C94 #WS_PONG:~C00 connection still alive");
+                }
                 else    
                     log_cmsg("~C91 #WS_WARN:~C00 unknown kind of data %s", $recv);                   
 
@@ -518,9 +537,12 @@
 
             if ($this->ws) {
                 $now = time();
-                $elps = $now - $this->last_ping ;
+                $uptime = $now - $this->create_t;
+                $elps = $now - $this->last_ping;
                 if ($elps > 30 || $wait) 
                     try {
+                        if ($uptime < 180)
+                            log_cmsg("~C94 #WS_PING:~C00 previus ping elapsed time %d sec", $elps);
                         $this->ws->send('ping');
                         $this->last_ping = $now;
                         $wait = true; // must read ping response
@@ -545,7 +567,7 @@
                 log_cmsg("~C31 #PERF_WARN_WS:~C00 elapsed time for LoadWS = %.3f sec with $wait ", $elps);
             }
 
-            if ($this->ready_subscribe && time() > $this->ready_subscribe) {
+            if ($this->ready_subscribe && time() > $this->ready_subscribe && $this->ws_active) {
                 $this->ready_subscribe = time() + 5; // next attempt in 5 minutes
                 $this->SubscribeWS();
             }
@@ -562,7 +584,7 @@
 
         public function TableName(string $suffix): string {
             if ($this->common_db)
-                return strtolower(  "{$this->exchange}__$suffix");
+                return strtolower(  "{$this->exchange}__$suffix");            
             return (sqli()->active_db() == $this->db_name) ? $suffix : "{$this->db_name}.$suffix";
         }
 

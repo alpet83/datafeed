@@ -49,6 +49,8 @@
 
         protected $owner = null;
 
+        protected $upd_loop = 0; // number of update loop inside LoadBlock
+
         public function __construct(BlockDataDownloader|null $loader, int $start = 0, int $end = 0) {
             $this->owner = $loader;
             $this->process_stats = $start > EXCHANGE_START_SEC;
@@ -182,6 +184,10 @@
                             implode(',', $fake), $ts);
         }
 
+        public function Finished() {
+            return BLOCK_CODE::FULL == $this->code || BLOCK_CODE::VOID == $this->code;
+        }
+
         public function format_filled(int $avg_full = 1000): string {
             $res = '';
             for ($hour = 0; $hour < 24; $hour ++)  {
@@ -299,6 +305,10 @@
             $this->min_avail = $this->rbound;
         }
 
+        public function SaldoVolume(): float {
+            return 0;
+        }
+
         public function SetRow(mixed $key, array $row): int { // no stats update, but must reimplemented in child class
             $class = get_class($this);
             log_cmsg("~C94 #DBG_SET_ROW($class):~C00 [%s] = %s, created from %s", $key, json_encode($row), $this->created_from);
@@ -370,4 +380,25 @@
         public function UnfilledBefore(): int {
             return $this->oldest_ms();
         }
+
+        public function VoidLeft(string $unit = 's'): float {
+            return seconds2u(max(0, $this->min_load - $this->lbound), $unit);
+        }
+        public function VoidRight(string $unit = 's'): float {
+            return seconds2u(max(0,  $this->rbound - $this->max_load), $unit);
+        }
+
+    }
+
+    function seconds2u(int $t, string $unit): float {
+        if ('s' == $unit) return $t;
+        elseif ('ms' == $unit) 
+            return $t * 1000;
+        elseif ('m' == $unit)
+        return $t / 60;
+        elseif ('h' == $unit)
+            return $t / 3600;
+        elseif ('d' == $unit)
+            return $t / 86400;
+        return NAN;
     }

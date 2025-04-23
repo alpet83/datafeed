@@ -16,6 +16,7 @@
         public function __construct(string $symbol, string $data) {            
             global $tmp_dir;
             $this->tmp_dir = $tmp_dir;
+            $this->db_name = DB_NAME;
             $this->exchange = 'bitmex';      
             $this->rest_api_root = 'https://www.bitmex.com/api/v1/';            
             // all config tables in MySQL!
@@ -45,7 +46,8 @@
                         $this->on_subscribe($args);
                 }               
             } elseif ('info' == $event && isset($data->platform)) {
-                log_cmsg("~C97 #WS_CONNECT~C00: %s", print_r($event, true));
+                log_cmsg("~C97 #WS_CONNECT~C00: %s %s", json_encode($event), json_encode($data->platform));
+                $this->ws_active = true;
                 $this->SubscribeWS();
                 // if (1 == $data->platform->status)     $this->SubscribeWS();
             } //*/

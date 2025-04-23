@@ -66,7 +66,7 @@
             }
 
             if ($this->manager->VerifyRow($data)) {
-                log_cmsg("~C91 #STRANGE:~C00 directly single row %s passed from %s ", json_encode($data), format_backtrace());                
+                log_cmsg("~C91 #STRANGE:~C00 directly single row %s passed from %s: %s ", json_encode($data), $source, format_backtrace());                
                 $data = [$data];
             }
 
@@ -117,16 +117,25 @@
                 $direct_sync = true;
             }
 
-            if (count($result) > 0 && $direct_sync) {
-                $result->Store($block);
-                $cnt = $this->SaveToDB($result, false);           
-            }
             
+            $last_t = $result->lastKey();
+            $latest = $this->last_block->max_avail;
 
+            $data_elps = time() - $last_t;
             $target = $direct_sync ? $this->table_name : 'cache';
-            if ($cnt + $updated > 0 && $verbose >= 3)
-                log_cmsg("... into %s $target inserted %d, updated %d, from %d rows, total %.2fK candles, newest = %s, from %s",
-                            $this->ticker, $cnt, $updated, $checked, count($result) / 1000.0,  format_tms($this->newest_ms), $source);
+
+            if (count($result) > 0 && $direct_sync) {
+                $result->Store($block);                
+                $this->ws_data_last = max($this->ws_data_last, $last_t);
+                // ругаться можно если это обновление последнее, и оно отстает от имеющихся данных в целом                
+                if ($data_elps > 100 && $last_t == $this->ws_data_last && $last_t < $latest) 
+                    log_cmsg("~C31 #WS_DATA_LAG:~C00 %4u seconds elapsed last data for %s: %s from source %s vs last loaded %s ", 
+                                $data_elps, $this->symbol, color_ts($last_t), $source, color_ts($latest));
+                $cnt = $this->SaveToDB($result, false);           
+            }                        
+            if ($cnt + $updated > 0 && $verbose >= 3 && $data_elps < 100)
+                log_cmsg("... into %s $target inserted %d, updated %d, from %d rows, total %.2fK candles, last = %s, from %s",
+                            $this->ticker, $cnt, $updated, $checked, count($result) / 1000.0,  color_ts($last_t), $source);
 
             return $result;
         }             
@@ -157,11 +166,11 @@
             $cursor = EXCHANGE_START_SEC;
             if (is_array($res) && count($res) > 0) {
                 $cursor = array_key_last($res);
-                $cursor -= SECONDS_PER_DAY;                
+                $cursor -= SECONDS_PER_DAY * 7;                
             }            
 
             $json = 'fail';            
-            $table_name = $this->table_name.'__1D';
+            $table_name = "{$this->table_name}__1D";
 
             $orig_table = $this->table_name;
             $map = [];
@@ -258,16 +267,26 @@
         }
         
         protected function SubscribeWS() {
-            $keys =  array_keys($this->loaders);
-            foreach ($keys as $pair_id) {        
-                
-                $downloader = $this->Loader ($pair_id);                
-                $key = "{$this->ws_data_kind}:{$downloader->symbol}";
-                $params = ['key' => $key];
-                log_cmsg("~C97 #WS_SUB~C00: symbol = %s", $downloader->symbol);
-                if ($this->ws instanceof BitfinexClient)
-                    $this->ws->subscribe('candles', $params);
+            $keys =  array_keys($this->GetRTMLoaders());
+            $already = 0;
+            $added = 0;            
+            $ws = $this->ws;
+            foreach ($keys as $pair_id) {       
+                $downloader = $this->Loader ($pair_id);                                
+                if ($downloader->ws_sub) {
+                    $already ++;
+                    continue;
+                }                
+                if (is_object($ws) && $ws instanceof BitfinexClient) {
+                    $key = "{$this->ws_data_kind}:{$downloader->symbol}";
+                    $params = ['key' => $key];                                    
+                    log_cmsg("~C97 #WS_SUB_ADD~C00: symbol = %s", $downloader->symbol);    
+                    $added ++;
+                    $ws->subscribe('candles', $params);
+                }
             }
+            if ($added > 0) 
+                log_cmsg("~C04~C97 #WS_SUB_TOTAL:~C00 %u pairs already subscribed, %u added", $already, $added);
         } // function SubscribeWS        
 
         public function VerifyRow(mixed $row): bool {

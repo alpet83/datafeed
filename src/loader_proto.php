@@ -121,6 +121,8 @@
 
         public      $time_precision = 1; // like MySQL where 1 - seconds, 3 - ms, 6 - us        
 
+        public      $ws_data_last = 0;  // latest timestamp in WebSocket data
+
         public      $ws_time_last = 0;  // клиентское время приема последних данных
         public      $ws_newest = 0;     // лучшее время данных полученных через ws
         public      $ws_sub = null;    // ws subscription desc or true 
@@ -164,8 +166,10 @@
             $mysqli_df = sqli_df();                
             $search = '@TABLENAME';            
             $mgr = $this->get_manager();
-            $exists = in_array($this->table_name, $mgr->db_tables_mysql);            
-            $result = $exists || $this->ProcessTemplate($mysqli, $this->table_proto, $search, $this->table_name);;                      
+            $exists = in_array($this->table_name, $mgr->db_tables_mysql);        
+            $result = true;            
+            if (str_in($this->table_proto, 'mysql'))                 
+                $result = $exists || $this->ProcessTemplate($mysqli, $this->table_proto, $search, $this->table_name);                      
 
             if ($mysqli != $mysqli_df && !$mysqli_df->is_clickhouse())  {            
                 $result &= $this->ProcessTemplate($mysqli_df, $this->table_proto, $search, $this->table_name);            

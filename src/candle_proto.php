@@ -80,6 +80,9 @@
             return parent::IsFullFilled();
         }
 
+        public function SaldoVolume(): float {
+            return $this->CalcSummary(CANDLE_VOLUME);
+        }
 
         public function SetFlags(int $key, int $flags, bool $set = true) {
             if (isset($this->cache_map[$key])) {
@@ -99,7 +102,7 @@
         public function SetRow(mixed $key, array $row): int {                   
             verify_timestamp($key, 'CandlesCache->SetRow');
             $key = floor($key / $this->interval) * $this->interval; 
-            
+
             if (isset($this->cache_map[$key])) $this->duplicates ++;   
             if ($this->interval < SECONDS_PER_DAY && count($row) < 6)
                 $row []= $this->mark_flags; // flags
