@@ -72,8 +72,18 @@
 
 
     $year = date("Y");
+    $opt = '';
+    $code = $mysqli->show_create_table($t_listings);
+
+    if (str_in($code, "p$year"))
+        $opt = "PARTITION (p2025)";
+    else {
+       $msg = format_color("~C31#PERF_WARN:~C00 no parition for year %s dected in table %s for server %s: %s", $year, $t_listings, $db_alt_server, $mysqli->server_info );
+       fputs($log_file, $msg);
+    }
+
     $res = $mysqli->select_from('cm_id, circulating_supply, supply_coef, volume24_musd, volume24_coins, gain_daily, gain_weekly', 
-                                    "`$t_listings` PARTITION (p$year)", 'ORDER BY ts DESC, cm_id DESC, symbol DESC LIMIT 1000');
+                                    "`$t_listings` $opt", 'ORDER BY ts DESC, cm_id DESC, symbol DESC LIMIT 1000');
     $stats_map = [];                                    
   
     if ($show_perf && is_object($res))

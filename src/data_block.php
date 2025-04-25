@@ -37,8 +37,11 @@
         public  $last_api_request = ''; // last API request
         public  $last_load = 0; // last load was (timestamp in seconds)
 
+
+        public  $avail_volume = 0; // объем в БД, для блоков подлежащих восстановлению
         public  $target_volume = 0; // целевой объем, для контроля 
 
+        public  $db_need_clean = false; // указание на зачистку области БД, где есть записи подходящие по диапазону
                 
         protected $created_from = '';
 
@@ -109,7 +112,7 @@
         public function __toString() {
             $avail = 'EMPTY';
             if ($this->fills > 0 && $this->min_avail <= $this->max_avail)
-                 $avail = sprintf('AVAIL[%s..%s] F:%d', color_ts($this->min_avail), color_ts($this->max_avail), $this->fills);
+                 $avail = sprintf('AVAIL[%s..%s] C:%d', color_ts($this->min_avail), color_ts($this->max_avail), count($this));
             return sprintf("IDX:%d, BOUNDS[%s..%s], %s, C:%s", 
                             $this->index, color_ts($this->lbound), color_ts($this->rbound),
                             $avail, $this->code->name);                
@@ -142,12 +145,12 @@
         }
 
         public function Covers(int $t) {
-            return $this->lbound <= $t && $t < $this->rbound; // rbound can be next day
+            return $this->lbound <= $t && $t <= $this->rbound; // rbound can be next day
         }
 
         public function Covers_ms(float $tms) {
             $tss = floor($tms / 1000);            
-            return $this->lbound <= $tss && $tss < $this->rbound; // rbound can be next day
+            return $this->lbound <= $tss && $tss <= $this->rbound; // rbound can be next day
         }
 
         public function Export(float $filter = 0): array {
@@ -266,7 +269,7 @@
             return array_key_last($this->cache_map);                           
         }
 
-        public function newest_ms() {
+        public function newest_ms(): int {
             verify_timestamp($this->max_avail, 'from block->newest_ms');
             return $this->max_avail * 1000;
         }
@@ -293,7 +296,7 @@
             $this->max_avail = min($this->rbound, $this->max_avail);
         }
 
-        public function oldest_ms() {
+        public function oldest_ms(): int {
             verify_timestamp($this->min_avail, 'from datablock->oldest_ms');
             return $this->min_avail * 1000;        
         }

@@ -44,7 +44,8 @@
         public      $tail_loaded = false;
 
         protected   $initialized = false;
-        
+        protected   $init_count = 0;
+
         public      int $loaded_blocks = 0;
         protected   $import_method = '';  // converter from API format to common
         protected   $load_method = '';  // REST loader for kind of data
@@ -243,8 +244,7 @@ SKIP_DOWNLOAD:
 
             
             if (is_object($chdb))
-            try {
-                log_cmsg("~C93#INFO:~C00 detected native ClickHouse connection...");
+            try {                
                 $chdb->database(DB_NAME);
                 $tables = $chdb->showTables();                                                
                 $short_name = str_replace(DB_NAME.'.', '', $this->table_name);
@@ -263,11 +263,10 @@ SKIP_DOWNLOAD:
                 $this->table_create_code_ch = $table_code;
                 if (!is_string($table_code) || !str_in ($table_code, 'ENGINE = MergeTree')) {
                     // log_cmsg("~C97#INFO:~C00 table proto: %s", $table_proto);
-                    $res = $chdb->select("SELECT COUNT(*) AS count FROM $table_name FINAL");
-                    log_cmsg("~C93 #SIZE:~C00 %d", $res->fetchOne()['count']);                    
+                    // $res = $chdb->select("SELECT COUNT(*) AS count FROM $table_name FINAL");
+                    // log_cmsg("~C93 #SIZE:~C00 %d", $res->fetchOne()['count']);                    
                     $res = $chdb->write("OPTIMIZE TABLE $table_name FINAL");
-                    if (is_object($res))
-                        log_cmsg("~C93 #OPTIMIZE:~C00 %s", json_encode($res->info()));
+                    // if (is_object($res)) log_cmsg("~C93 #OPTIMIZE:~C00 %s", json_encode($res->info()));
                     return;
                 }
                 goto DUMP_SQL;                
@@ -364,9 +363,9 @@ DUMP_SQL:
          */
         protected function InitBlocks(int $start, int $end) {
             $this->blocks = [];
-
             $this->LinearFillBlocks($start, $end);            
             $this->initialized = true;
+            $this->init_count ++;
             // WARN: избыточные блоки не фильтруются здесь!
         }
 
@@ -398,10 +397,11 @@ DUMP_SQL:
         }
 
         public   function   LoadBlock(int $index): int { // only last data checks            
-            global $verbose, $rest_allowed_t;
+            global $verbose, $rest_allowed_t, $chdb;
             if (!$this->initialized && $index >= 0)
                 throw new ErrorException("~C91#ERROR:~C00 LoadBlock(%d) called before InitBlocks()", $index);               
 
+            $mysqli_df = sqli_df();    
             $today = date('Y-m-d'); // за текущий день слишком много запросов
             $this->last_error = '';
             $block = $this->last_block;            
@@ -447,6 +447,29 @@ DUMP_SQL:
                 return 0;   
             }            
 SKIP_CHECKS:            
+            if ($block->db_need_clean) {
+                // remove for reliable overwrite
+                $from_ts = $this->TimeStampEncode($block->lbound );
+                $to_ts =   $this->TimeStampEncode($block->rbound);
+                $query = "DELETE FROM {$this->table_name} WHERE (ts >= '$from_ts') AND (ts <= '$to_ts')";                                        
+                $res = $mysqli_df ->try_query($query); // remove excess data                    
+                $data_info = $res ? format_color("Removed %d candles from MySQL", $mysqli_df->affected_rows) : "~C91Failed remove exist data: ~C00{$mysqli_df->error}";                                    
+                if ($chdb)
+                    try {
+                        $stmt = $chdb->write($query);
+                        if (!is_object($stmt) ||$stmt->isError()) 
+                            $data_info .= format_color("~C91Failed~C00 query %s on ClickHouse", $query);
+                        elseif (is_object($stmt))
+                            $data_info .= ", from ClickHouse some rows removed";
+                    } 
+                    catch (Exception $e) {
+                        log_cmsg("~C91#ERROR:~C00 query failed on ClickHouse: %s", $e->getMessage());
+                    }
+                log_cmsg("~C04~C93 #BLOCK_CLEAN: ~C00  $data_info");    
+                $block->Reset(); // min/max avail must be reseted   
+            }
+
+
             $added = 0;                
 
             $this->loops = 0;              
@@ -499,11 +522,17 @@ SKIP_CHECKS:
                     }
                     
                     $reverse = true;
+                    $after_ms  = $block->UnfilledAfter(); 
+                    $before_ms = min($before_ms,  $block->UnfilledBefore()); // in ms                                        
+
                     // коррекция курсора, по данным в кэше
-                    if (count($cache) > 0) {
+                    // && ($cache->Covers($block->min_avail) || $cache->Covers($block->max_avail))
+                    if (count($cache) > 0 ) {                        
+
                         $oldest_ms = $cache->oldest_ms();
-                        $newest_ms = $cache->newest_ms();                        
-                        $before_ms = min($before_ms, $oldest_ms, $block->UnfilledBefore()); // in ms                                        
+                        $newest_ms = $cache->newest_ms();                                                                      
+                        $after_ms  = max($after_ms, $newest_ms);                                                
+                        $before_ms = min($oldest_ms, $before_ms); // обеспечение непрерывности данных в кэше?
                         if ($before_ms < EXCHANGE_START) {
                             log_cmsg("~C91#ERROR(LoadBlock):~C00  before_ms (%d) = oldest_ms (%d) | block->UnfilledBefore(%d) < EXCHANGE_START for block %s, from cache %s", 
                                             $before_ms,  $oldest_ms, $block->UnfilledBefore(),
@@ -511,14 +540,9 @@ SKIP_CHECKS:
                             break;
                         }
                         $this->oldest_ms = min($this->oldest_ms, $oldest_ms);    
-                    }                    
-                    
-
-                    $after_ms = 0;    
-                    $block_id = "$index:{$block->key}";
-
-                    
-                    $after_ms = $block->UnfilledAfter(); 
+                    }                
+                                        
+                    $block_id = "$index:{$block->key}";                                        
                     
                     if ($index < 0) { // last block, need tail load                                                        
                         if ($now < $block->next_retry) break;
@@ -546,17 +570,30 @@ SKIP_CHECKS:
                         log_cmsg("~C34#BLOCK_HEAD_LOAD:~C00 block %s $info, requesting left completion before %s, target volume %s", 
                                     $block_id, color_ts($before_ms / 1000), format_qty($block->target_volume));
                     }
-                    elseif ( $after_ms != $block->last_fwd && $block->max_avail < $block->rbound) { // $block->rbound - $block->max_avail > 300 &&
+                    elseif ( $after_ms != $block->last_fwd && $after_ms < $block->rbound_ms) { // $block->rbound - $block->max_avail > 300 &&
                         log_cmsg("~C36#BLOCK_TAIL_LOAD:~C00 block %s filled %d before %s, requesting right completion, target volume %s",  
                                     $block_id, $block->filled, format_tms($after_ms), format_qty($block->target_volume));                        
                         $reverse = false;                        
                     }                
-                    else {  // все варианты попробованы, остается пропуск
+                    elseif (count($cache) > 0) {  // все варианты попробованы, остается пропуск
                         $data = [];
-                        if ( 0 == ($block->attempts_bwd + $block->attempts_fwd)) 
-                            log_cmsg("~C33#BLOCK_SKIP:~C00 no additional records received, tested before %s after %s ", format_ts($block->last_bwd), format_ts($block->last_fwd));
-                        $this->cache_hit = true;
-                        $block->code = $block->fills > 0 ? BLOCK_CODE::FULL : BLOCK_CODE::VOID;
+                        $this->cache_hit = true;                                        
+                        $avail = count($block);
+                        $stored = $cache->Store($block);                        
+                        if ($stored > $avail) 
+                            $this->OnCacheUpdate($block, $cache);                                                                             
+
+                        $block->attempts_bwd ++;
+                        $block->attempts_fwd ++;
+
+                        if ( $block->last_bwd > 0 && $block->last_fwd > 0 ) // для этого блока проводилось выделенное сканирование, его не накрыло большим кэшем
+                            log_cmsg("~C33#BLOCK_SKIP:~C00 no additional records received, was tested before %s after %s, covered %d / %d records ",
+                                        format_ts($block->last_bwd), format_ts($block->last_fwd), $stored, $avail);
+                        else 
+                            log_cmsg("~C33#BLOCK_SKIP:~C00 source timepoints %s .. %s outbound block %s, covered %d / %d records; no download will help",
+                                        strval($block), format_tms($before_ms), format_tms($after_ms), $stored, $avail);
+                                                    
+                                    
                         goto PROCESS_DATA;
                     }
 
@@ -616,7 +653,7 @@ SKIP_CHECKS:
                         $method = $this->import_method;                        
                         $prev_avail_min = $block->min_avail;
                         $prev_avail_max = $block->max_avail;                        
-                        if (strlen($method) > 1 && method_exists($this, $method)) 
+                        if (method_exists($this, $method)) 
                             $mini_cache = $this->$method ( $data, 'Rest-API', $index < 0);               
                         else
                             throw new ErrorException("FATAL: method $method not found in ".get_class($this));
@@ -719,22 +756,18 @@ SKIP_CHECKS:
                                     color_ts( $block->max_avail));
                     }   // if mini_cache loaded 
                     elseif (is_array($data) ) {
-                        if ($block->attempts_bwd + $block->attempts_fwd >= 10) {
-                            if (0 == $block->fills && $block->min_avail == $block->rbound && $block->max_avail == $block->lbound) 
-                                $block->code = BLOCK_CODE::VOID;
-                            else    
-                                $block->code = BLOCK_CODE::FULL;
+                        if ($block->attempts_bwd > 2 && $block->attempts_fwd > 2) {
+                            $block->code = 0 == count($block) ? BLOCK_CODE::VOID : BLOCK_CODE::FULL;
                             $block->info = 'data not received/imported several times';
-                            log_cmsg("~C31#VOID_RESPONSE:~C00  block marked as completed, now in cache %d $data_name ", json_encode($data), count($this->cache));
+                            log_cmsg("~C31#VOID_CACHE:~C00 block marked as completed, last_loaded %d, imported %d $data_name", count($data), count($this->cache));
                         }
                         else
-                            log_cmsg("~C94#VOID_RESPONSE:~C00 ~C00 block %d, no data received, attempts %d", $index, $block->attempts_bwd + $block->attempts_fwd);                    
+                            log_cmsg("~C94#VOID_CACHE:~C00 ~C00 block %s, no data imported from %d records, attempts %d, last error: %s",
+                                        $block_id, count($data), $block->attempts_bwd + $block->attempts_fwd, $this->last_error);                    
                     }
 
                     $this->loops ++;                                                         
-                    if (BLOCK_CODE::FULL == $block->code || BLOCK_CODE::VOID == $block->code) {                                                                
-                        break;                                       
-                    } 
+                    
                     $mgr->ProcessWS(false); // обновления мимо кэша!
                     
                     $last_ts = '';
@@ -751,7 +784,11 @@ SKIP_CHECKS:
                         log_cmsg("~C94#LAST_BLOCK_SYNC: ~C00 latest avail %s (+%d s), loaded %d $data_name, rest blocks %d$brk ", 
                                 color_ts($last_ts), time() - $block->max_avail, $last_loaded, $this->BlocksCount());
                         if ($brk) break;                           
-                    }                     
+                    } 
+
+                    if (BLOCK_CODE::FULL == $block->code || BLOCK_CODE::VOID == $block->code) {                                                                
+                        break;                                       
+                    } 
                 } // while
             } catch (Throwable $E) {
                 log_cmsg("~C91#EXCEPTION(LoadBlock):~C00 %s at %s:%d, trace: %s", $E->getMessage(), $E->getFile(), $E->getLine(), $E->getTraceAsString());
@@ -865,9 +902,13 @@ SKIP_CHECKS:
 
 
             $end = $this->db_first(false, 1); // in seconds!
-            if (!is_int($end) || $end < EXCHANGE_START_SEC) {
-                log_cmsg("~C97#HISTORY_VOID:~C00 required full history download for %s", $this->ticker);
+            if (!is_int($end)) {
+                log_cmsg("~C107~C00 #HISTORY_VOID: ~C00~C40 required full history download for %s", $this->ticker);
                 $end = time() - 60;
+            }
+            if ($end < EXCHANGE_START_SEC) {
+                log_cmsg("~C91#WARN:~C00 for %s end time %s in DB < EXCHANGE_START_SEC", $this->ticker, format_ts($end));
+                $end = EXCHANGE_START_SEC;
             }
 
             if ($end <= $start)  {                
@@ -908,7 +949,8 @@ SKIP_CHECKS:
 
         public function RestDownload(): int {
             global $verbose, $rest_allowed_t;
-            if ($this->rest_errors > 100)  return -1;          
+            if ($this->rest_errors > 100)  return -1;                     
+            if (0 == ($this->data_flags & DL_FLAG_HISTORY)) return 0; // TODO: may allow download last block late
                           
             $n_blocks = count($this->blocks);
             $mgr = $this->get_manager();
@@ -980,8 +1022,11 @@ SKIP_CHECKS:
             $minute = date('i');
             $big_loads = 0;                  
             $total_loops = 0;
-            $this->last_error = '';
-            
+            $this->last_error = '';            
+
+            if (count($this->cache) > 0) {                
+                $this->FlushCache();
+            }
 
             // download history by mapping
             while ($index >= 0 && $big_loads < $this->blocks_at_once) {
@@ -1030,6 +1075,11 @@ SKIP_CHECKS:
 
             $blocks = array_reverse($this->blocks);
 
+            $cache_size = count($this->cache);
+            if ($cache_size > 0) {                
+                $this->FlushCache();
+            }
+
             foreach ($blocks as $block) 
                 if ($block->Finished()) {
                     $this->OnBlockComplete($block);    
@@ -1037,11 +1087,6 @@ SKIP_CHECKS:
                     unset($this->blocks_map[$block->key]);
                     $removed ++;                
                 }
-
-            $cache_size = count($this->cache);
-            if ($cache_size > 0) {                
-                $this->FlushCache();
-            }
             
             if ($removed > 0)
                 log_cmsg("~C97#COMPLETE:~C00 While download %d blocks removed for %s, codes: %s", $removed, $this->ticker, json_encode($code_map));

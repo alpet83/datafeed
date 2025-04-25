@@ -179,7 +179,8 @@
             $url = $this->rest_api_url.'/trade/bucketed';
             $per_once = min($per_once, 1500); 
 
-            $params = ['symbol' => $this->symbol, 'binSize' => '1d', 'partial' => 'false', 'reverse' => 'false', 'count' => $per_once];                      
+            $params = ['symbol' => $this->symbol, 'binSize' => '1d', 'columns' => 'open,close,high,low,volume', 
+                       'partial' => 'true', 'reverse' => 'false', 'count' => $per_once];                      
             $cursor = 0; // is_array($res) ? count($res) - 1 : 0;            
 
             $json = 'fail';                        
@@ -195,7 +196,7 @@
             $orig_table = $this->table_name;
             try {
                 $this->table_name = $table_name;                
-                log_cmsg("~C93 #LOAD_DAILY:~C00 requesting daily candles for %s", $this->symbol);                
+                log_cmsg("~C93 #LOAD_DAILY:~C00 requesting daily candles for %s, available in DB %d", $this->symbol, count($stored));
                 $candles = new CandlesCache($this);
                 
                 $mysqli->try_query("CREATE TABLE IF NOT EXISTS $table_name LIKE $orig_table");
@@ -208,27 +209,29 @@
                     $params['start'] = $cursor;
                     $rqs = $url.'?'.http_build_query($params);
                     log_cmsg("~C93   #API_REQUEST:~C00 %s", $rqs);
-                    $json = $this->api_request($url, $params);
+                    $json = $this->api_request($url, $params, -1);
                     $data = json_decode($json);
                     if (!is_array($data) || count($data) == 0) break;
-                    $part = $this->ImportCandles($data, 'REST-API-1D', false);
-                    $imp = count($part);
-                    $cursor += $imp;
-                    $part->Store($candles);      
-                    $this->SaveToDB($part, true); // по кусочкам сохранять, иначе ругается ClickHouse! 
+                    $part = $this->ImportCandles($data, 'REST-API-1D', true);
+                    $imp = 0;
+                    if (is_object($part)) {
+                        $imp =  count($part);
+                        $cursor += $imp;
+                        $part->Store($candles);                          
+                    }
                     if ($imp < $per_once) break;                    
                 }            
                 
                 if (0 == count($candles)) 
-                    log_cmsg("~C91#ERROR:~C00 failed load daily candles via %s, response = %s", 
-                                $this->last_api_request, substr($json, 0, 100));                                
+                    log_cmsg("~C91#ERROR_SERIOUS:~C00 failed load/import daily candles via %s, last err %s, JSON = %s", 
+                                $this->last_api_request, $this->last_error, substr($json, 0, 200));                                
                 else  {
-                    $ft = $candles->firstKey();                    
-                    $first = $candles->first();
+                    $tk = $candles->lastKey();                    
+                    $last = $candles->last();
                     $updates = $candles->Export();                  
 
-                    log_cmsg("~C92#SUCCESS:~C00 loaded %d daily candles, interval %d, trying save to %s, first %s : %s", 
-                                count($candles), $this->current_interval, $this->table_name, color_ts($ft), json_encode($first, JSON_NUMERIC_CHECK) );                                                                    
+                    log_cmsg("~C92#SUCCESS:~C00 loaded %d daily candles, interval %d, trying save to %s, lasst %s : %s", 
+                                count($candles), $this->current_interval, $this->table_name, color_ts($tk), json_encode($last, JSON_NUMERIC_CHECK) );                                                                    
                 }
             } 
             finally {
@@ -248,13 +251,11 @@
 
             if (!$this->initialized && $uptime < 300 && $this->current_interval < SECONDS_PER_DAY) 
                 $this->CorrectTable();
-
-            if (!is_array($data)) {
-                $this->last_error = format_color("~C91 #WARN:~C00 decode failed for json data, type = %s? ", gettype($data));
+                    
+            if (0 == count($data)) {
+                $this->last_error = 'void source data';
                 return null;
-            }            
-            if (0 == count($data))
-                return null;
+            }
 
             $dbg_from  = time() - SECONDS_PER_DAY * 5;  // start of day
             $now = time() * 1000;
@@ -284,6 +285,7 @@
                 $have_ticks = $stmt->count() > 0;
 
             $interval = $this->current_interval;
+            $intraday = $interval < SECONDS_PER_DAY;
             $day_last = SECONDS_PER_DAY - $interval;
 
             if ($interval < 60)
@@ -320,7 +322,7 @@
                 }          
 
                 // при прямой синхронизации подразумеваются полезными только свежие данные хвоста блока, чтобы поменьше обращаться к БД - пропуск старых
-                if ($direct_sync && $tk < $last_block->max_avail) {
+                if ($direct_sync && $intraday && $tk < $last_block->max_avail) {
                     $dups ++;
                     continue;
                 }
@@ -375,8 +377,8 @@
             $cnt = count($result);
             $target = $direct_sync ? $this->table_name : 'cache';
             if ($rcnt > 0 && 0 == $cnt && 0 == $updated) {
-                if (0 == $dups)
-                    log_cmsg("~C91WARN:~C00 no data imported from $rcnt records. Invalid %d, flood %d. Test: %s" , $invalid, $flood, var_export($data[0], true));
+                $this->last_error .= format_color ("no fresh data was imported from $rcnt records. Invalid %d, flood %d, dups %d. Test: %s" ,
+                                                    $invalid, $flood, $dups, var_export($data[0], true));
                 return null;
             }
 

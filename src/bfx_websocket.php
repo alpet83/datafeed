@@ -16,6 +16,10 @@
             $config->setTimeout(2);               
         } 
         parent::__construct("wss://api-pub.bitfinex.com/ws/$api", $config);   
+        if (isset($this->socket) && is_resource($this->socket)) {            
+            $result = stream_set_read_buffer($this->socket, 1048576); 
+            log_cmsg("~C93 #WS_CONFIG:~C00 set socket read buffer: %s", 0 == $result ? 'OK': "~C91 $result");            
+        }
     }  
   
     public function  subscribe($channel, $params = false) {
@@ -37,9 +41,6 @@
     }
 
     public function unreaded() {
-        if (isset($this->unread_bytes) && $this->uread_bytes > 0)
-            return $this->unread_bytes;
-
         if (isset($this->socket) && is_resource($this->socket)) {
             $mtd = stream_get_meta_data($this->socket);
             if ($mtd && is_array($mtd) && isset($mtd['unread_bytes']))

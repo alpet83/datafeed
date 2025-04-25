@@ -54,7 +54,10 @@
             $this->RegisterSymbol('candles', $this->pair_id);
             if (strpos($this->symbol, 'BTC') || strpos($this->symbol, 'ETH'))
                 $this->normal_delay = 30; 
-            $this->blocks_at_once = 2;
+            $this->blocks_at_once = 5;
+            $this->days_per_block = 1;
+            $this->default_limit = 1450; // enough less 10k, for 5 days/blocks
+            $this->volume_tolerance = 0.55;
         } // constructor
  
 
@@ -74,7 +77,8 @@
             $this->last_cycle = $mgr->cycles;
 
             $result = new CandlesCache($this);;      
-            $result->interval = $this->current_interval;          
+            $result->interval = $this->current_interval;    
+            $result->key = 'imported';
 
             $now = time_ms();
             $cnt = 0;            
@@ -144,8 +148,7 @@
 
         public function LoadCandles(DataBlock $block, string $ts_from, bool $backward_scan = true, int $limit = 5 * 24 * 60): ?array {
             $url = $this->rest_api_url;              
-            if ($block->recovery && 1 == $this->days_per_block && $this->current_interval < SECONDS_PER_DAY)
-                $limit = min(1600, $limit);
+            // if ($block->recovery && 1 == $this->days_per_block && $this->current_interval < SECONDS_PER_DAY)                $limit = min(1600, $limit);
             $params = ['limit' => $limit, 'sort' => $backward_scan ? -1 : 1];
             $path = "candles/trade:1m:{$this->symbol}/";            
             if ($this->is_funding)
@@ -176,16 +179,17 @@
             $map = [];
             try {
                 $this->table_name = $table_name;
-                $this->current_interval = SECONDS_PER_DAY;
+                $candles = new CandlesCache($this); 
+                $candles->interval = $this->current_interval = SECONDS_PER_DAY;
+
                 if (!$this->CreateTables())
                     throw new Exception("~C91#ERROR:~C00 failed create table %s", $this->table_name);
                 log_cmsg("~C93 #LOAD_DAILY:~C00 requesting daily candles for %s from exchange", $this->symbol);
-                $attempts = 10;
-                $candles = new CandlesCache($this); 
+                $attempts = 10;                
 
                 while ($attempts -- > 0) {
                     $params['start'] = $cursor * 1000; // param in ms
-                    $json = $this->api_request($url, $params);
+                    $json = $this->api_request($url, $params, -1);
                     $data = json_decode($json);
                     if (!is_array($data) || count($data) == 0) break;
                     $part = $this->ImportCandles($data, 'REST-API-1D', false);                                    

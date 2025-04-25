@@ -19,6 +19,8 @@
 
         public $mark_flags = 0;
 
+        public $stat_rec = null;
+
 
         public  function AddRow(int $t, float $open, float $close, float $high, float $low, float $volume, int $flags = 0) {            
             $rec = [$open, $close, $high, $low, $volume]; 
@@ -68,15 +70,19 @@
             if (SECONDS_PER_DAY - 60 == $t) 
                 $flags |= CANDLE_CLOSE + 1;
 
-            $rec = [0, 0, 0, 0, $flags];
+            $rec = [0, 0, 0, 0, 0, 0];
             if (isset($this->cache_map[$best])) 
-                $rec = $this->cache_map[$best]['price'];                        
+                $rec = $this->cache_map[$best];                                    
+
+            $rec[CANDLE_FLAGS] = $flags;
             $this->cache_map[$t] = $rec;
         }    
 
         public function IsFullFilled(): bool {             
-            if ($this->target_volume > 0)
-                return  $this->target_volume == $this->CalcSummary(CANDLE_VOLUME);
+            if ($this->target_volume > 0) {
+                $saldo_vol = $this->SaldoVolume();
+                return  $this->target_volume <= $saldo_vol;
+            }
             return parent::IsFullFilled();
         }
 
@@ -101,31 +107,56 @@
 
         public function SetRow(mixed $key, array $row): int {                   
             verify_timestamp($key, 'CandlesCache->SetRow');
+            if ($key < $this->lbound || $key > $this->rbound)
+                throw new ErrorException("FATAL: invalid timestamp $key, outbound of range {$this->lbound}..{$this->rbound}");
+
             $key = floor($key / $this->interval) * $this->interval; 
 
-            if (isset($this->cache_map[$key])) $this->duplicates ++;   
-            if ($this->interval < SECONDS_PER_DAY && count($row) < 6)
-                $row []= $this->mark_flags; // flags
-            
+            if ($this->interval < SECONDS_PER_DAY)
+                $row [CANDLE_FLAGS] = $this->mark_flags; // flags
+
+            if (isset($this->cache_map[$key])) 
+                $this->duplicates ++;   
+            else
+                $this->set_filled($key);    
+
             $this->cache_map[$key] = $row;            
-            $this->set_filled($key);
+            
             return count($this->cache_map);            
         }
     
-        public function Store(CandlesCache $target) {
+        public function Store(CandlesCache $target): int  {
             $min = $target->lbound;
             $max = $target->rbound;
+            $stored = 0;
             foreach ($this->cache_map as $t => $rec) {                
-                if ($t >= $min && $t < $max)                     
+                if ($t >= $min && $t < $max) {                      
                     $target->SetRow($t, $rec);                
+                    $stored ++;
+                }
             }
             $target->OnUpdate();
+            return 0;
         }
+
+        public function newest_ms(): int {
+            if (0 == count($this)) 
+                return $this->lbound_ms;
+            return ($this->lastKey() + 59) * 1000;     
+        }
+        public function oldest_ms(): int {
+            if (0 == count($this)) 
+                return $this->rbound_ms;
+            return $this->firstKey() * 1000;     
+        }
+
         public function OnUpdate() {
             $this->min_fills = 60;
             parent::OnUpdate();
         }
-
+        public function UnfilledBefore(): int {
+            return $this->oldest_ms() + 1000;
+        }
     };
 
 
@@ -147,7 +178,13 @@
 
         protected  $daily_map = [];
 
+        protected  $sync_map = []; // ClickHouse sync checked
 
+        
+
+        protected  $stats_table = '';
+
+        protected  $volume_tolerance = 0.01;  // in % for block completion
         
         private    int $lazy_rcv = 0;        
 
@@ -157,9 +194,11 @@
             $this->load_method = 'LoadCandles';
             $this->block_class = 'CandlesCache';
             $this->data_name = 'candles';
-            $this->table_proto = 'mysql_candles_table.sql';            
+            $this->table_proto = 'mysql_candles_table.sql';                        
             parent::__construct($mngr, $ti);     
             $this->cache = new CandlesCache($this);            
+            $this->cache->key = 'main';
+            $this->stats_table = $mngr->TableName("stats__{$this->ticker}");
             $this->time_precision = 1;               
         }
 
@@ -170,12 +209,18 @@
         public function CorrectTable (){
             global $chdb;
             $mysqli = sqli();
-            if (!$mysqli->table_exists($this->table_name)) {
+            $table_name = $this->table_name;
+            if (!$mysqli->table_exists($table_name)) {
                 log_cmsg("~C31#WARN:~C00 table %s not exists, trying to create", $this->table_name);
                 $this->CreateTables();
             }
 
             parent::CorrectTable();           
+            $query = "DELETE FROM $table_name WHERE (open = 0) AND (volume = 4096)";
+            $mysqli->try_query($query); // remove invalid rows
+            if ($chdb)
+                $chdb->write($query);             
+
             if (strlen($this->table_create_code) < 10)
                 throw new Exception("~C91#ERROR:~C00 table {$this->table_name} code not retrieved: ".var_export($this->table_create_code, true));
             
@@ -196,9 +241,23 @@
             }
         }    
 
+        public function CreateTables(): bool {
+            $template = 'mysql_stats_table.sql';            
+            $mysqli_df = sqli_df();
+            if ($mysqli_df->table_exists($this->stats_table)) {
+                $code = $mysqli_df->show_create_table($this->stats_table);
+                if (str_in($code, 'volume_days'))
+                    $mysqli_df->query("ALTER TABLE {$this->stats_table} CHANGE `volume_days` `volume_day` FLOAT NULL DEFAULT NULL");
+            }
+            else
+                $this->ProcessTemplate($mysqli_df, $template, '@TABLENAME', $this->stats_table); 
+
+            return parent::CreateTables();
+        }
   
         public function FlushCache() {
             $this->SaveToDB($this->cache, true);                        
+            $this->cache->min_avail = $this->cache->max_avail = 0;
         }
 
         public function CleanPoor() {
@@ -315,9 +374,13 @@
             }              
             
             $this->blocks = [];
-            $this->blocks_map = [];
+            $this->blocks_map = [];            
+            $this->init_count ++;
 
             $mysqli_df = sqli_df();
+            $id_ticker = $this->ticker_info->id_ticker;
+            if (null !== $id_ticker)
+                $this->data_flags = $mysqli_df->select_value('load_candles', $this->tables['data_config'], "WHERE id_ticker = $id_ticker"); // update
 
             $block = $this->last_block;
             $day = date('Y-m-d'); // only today
@@ -327,10 +390,12 @@
             $block->max_avail = $mysqli_df->select_value($col, $this->table_name, "$strict ORDER BY ts DESC") ?? $block->max_avail;
             $block->min_avail = max($block->lbound, $block->min_avail);
 
-            $voids = $this->ScanIncomplete($end);            
-            log_cmsg("~C97#INIT_BLOCKS:~C00 for symbol %s will used range %s .. %s, expected download %d blocks, detected voids = %d, last block %s", $this->symbol,
-                        gmdate(SQL_TIMESTAMP, $start), gmdate(SQL_TIMESTAMP, $end), 
-                        count($this->blocks), $voids, strval($block));
+            if ($this->data_flags & DL_FLAG_HISTORY) {
+                $voids = $this->ScanIncomplete($end);            
+                log_cmsg("~C97#INIT_BLOCKS:~C00 for symbol %s will used range %s .. %s, expected download %d blocks, detected voids = %d, last block %s", $this->symbol,
+                            gmdate(SQL_TIMESTAMP, $start), gmdate(SQL_TIMESTAMP, $end), 
+                            count($this->blocks), $voids, strval($block));
+            }
 
             $this->initialized = true;
             
@@ -406,8 +471,7 @@
             }
             $symbol = $this->symbol;
             $block->OnUpdate();
-            $volume = $block->CalcSummary(CANDLE_VOLUME);
-            
+            $volume = $block->SaldoVolume();            
             $ftk = $block->firstKey();
             $ltk = $block->lastKey();            
             if (count($block) > 0) {            
@@ -418,41 +482,63 @@
             }
 
             $vdiff = $block->target_volume - $volume;
+            $vdiff_pp = 100 * $vdiff / max($block->target_volume, $volume, 0.01);
             // пороговое значение 0.1%, т.к. текстовые данные с преобразованием в float могут накопить погрешность
             $msg = '';
+            $date = $block->key;
             $tmp_dir = $this->manager->tmp_dir.'/blocks'; 
             $loaded = count($block);
             check_mkdir($tmp_dir);
-
-            if ( abs($vdiff) < $block->target_volume * 0.001 || -1 == $block->index && $loaded <= 1440) 
-                $msg = format_color("$prefix($symbol/$index):~C00 %s, lag left %d, summary volume = target %s, filled in session %d: %s ", 
-                            strval($block), $lag_left, $block->info, format_qty($volume), 
-                            $block->fills, $filled);       
-            else  {
-                $day = $this->daily_map[$block->lbound] ?? [];
+            $close_info = '';            
+            $last_day = floor_to_day($block->rbound);            
+            $last = $block->last() ?? [];
+            if (isset($this->daily_map[$last_day])) {
+                $day = $this->daily_map[$last_day];
                 $day_close = $day[CANDLE_CLOSE] ?? 0;
-                
-                $last = $block->last() ?? [];
-                
-                $msg = format_color("~C103~C31 #BLOCK_COMPLETE_WARN($symbol/$index): ~C00 %s have target volume %s vs calculated %s (diff %s), daily close = %.5f and last candle close = %s:%.5f, loaded %d", 
-                                strval($block),
-                                format_qty($block->target_volume),  format_qty($volume), format_qty($vdiff),
-                                $day_close,
-                                color_ts($ltk), $last[CANDLE_CLOSE] ?? 0, $loaded);                                         
-                $dump = [];
+                if ($day_close != $last[CANDLE_CLOSE]) 
+                    $close_info = format_color(", daily close %.5f != candle close %s:%.5f", $day_close, $ltk, $last[CANDLE_CLOSE]);
+            }            
+            else
+                log_cmsg("~C31#WARN:~C00 no info in daily_map [%s] for block %s", color_ts($last_day), strval($block));
+
+
+            $volume_info = '';    
+            if (abs($vdiff_pp) > $this->volume_tolerance)
+                $volume_info = format_color(", target volume %s vs calculated %s (diff_pp %.3f) vs avail was %s",
+                             format_qty($block->target_volume ?? 0),  format_qty($volume), $vdiff_pp, format_qty($block->avail_volume ?? 0));
+
+            if ('' == $volume_info  && '' == $close_info || -1 == $block->index && $loaded <= 1440) 
+                $msg = format_color("$prefix($symbol/$index):~C00 %s, lag left %4d, saldo volume %8s, CR: %s, filled in session %d: %s ", 
+                            strval($block), $lag_left, format_qty($volume), $block->info, $block->fills, $filled);       
+            else  {                
+                $repairs = 0;
+                if (is_object($block->stat_rec)) {                    
+                    $repairs = $block->stat_rec->repairs + 1;                    
+                    $query = sprintf("UPDATE %s SET repairs = $repairs, count_minutes = %d, volume_minutes = %.5f\n", 
+                                        $this->stats_table, count($block), $volume);                                        
+                    $query .= "WHERE date = '$date'";
+                    sqli()->try_query($query);
+                }                
+
+                $msg = format_color("~C103~C31 #BLOCK_COMPLETE_WARN($symbol/$index): ~C00 %s have $volume_info $close_info, loaded %d, repairs %d, CR: %s", 
+                                strval($block), $loaded, $repairs, $block->info);                                         
+                $dump = []; 
                 foreach ($block->Export(0.000001) as $tk => $rec) 
                     $dump [] = format_ts($tk).' = '.json_encode($rec);
                 $dump []= 'VOLUME ROW: '.json_encode($block->saldo_source);
                 $dump []= "VOLUME DIFF: expected {$block->target_volume}, achieved $volume, diff = ".format_qty($vdiff);
-                $dump []= '';
-                if ($block->key <= '2016-02-15' && str_in($tmp_dir, 'bmx')) {
-                    if (sqli()->try_query("UPDATE {$this->table_name}__1D SET volume = $volume WHERE DATE(ts) = '{$block->key}' ")) { // BitMEX invalid data patch
-                        log_cmsg("~C31 #BITMEX_PATCH:~C00 affected %d rows", sqli()->affected_rows);                    
-                        $this->daily_map[$block->key]->volume = $volume;                        
-                    }
-                }
+                $dump []= "$close_info\n";
+                $chg_diff = $volume - $block->avail_volume;
 
-                file_put_contents("$tmp_dir/bad-{$this->ticker}-{$block->key}.txt", implode("\n", $dump));
+                // патч применяется для старых данных BitMEX, где не все понятно 
+                if ( abs($chg_diff) < $volume * 0.001 && 1 == $this->days_per_block && str_in($date, '201')) {                    
+                    if (sqli()->try_query("UPDATE {$this->table_name}__1D SET volume = $volume WHERE DATE(ts) = '$date' ")) { // BitMEX invalid data patch
+                        log_cmsg("~C31 #DAILY_PATCH:~C00 affected %d rows", sqli()->affected_rows);                                            
+                    }
+                    $this->daily_map[$last_day][CANDLE_VOLUME] = $volume;
+                }                
+
+                file_put_contents("$tmp_dir/bad-{$this->ticker}-$date.txt", implode("\n", $dump));
             }
             $prefix = $block->recovery ? 'recovery' : 'completed';            
             file_add_contents("$tmp_dir/$prefix-{$this->ticker}.log", tss()."$msg\n");                
@@ -487,7 +573,7 @@
                 $days [$day] = ($days[$day] ?? 0) + 1;                
                 $block = $full_map[$tk] ?? $default;            
                 if ($block && $block->covers($tk) && BLOCK_CODE::FULL != $block->code)  {
-                    $covered [$day] = 1;
+                    $covered [$day] = $block;
                     $block->SetRow($tk, $rec);
                 }
                 elseif ($block)
@@ -495,6 +581,17 @@
             }   
 
             if (0 == count($this->blocks_map)) return;
+            $ftk = $cache->firstKey();
+            $ltk = $cache->lastKey();
+
+            foreach ($covered as $day => $block) {
+                if ($block->Covered_by($ftk, $ltk + 59) && $block->IsFullFilled()) {
+                    $block->code = BLOCK_CODE::FULL;
+                    $block->info = "covered by cache {$cache->key}";
+                }
+                elseif (BLOCK_CODE::NOT_LOADED == $block->code && count($block) > 0)
+                    $block->code = BLOCK_CODE::PARTIAL;                
+            }
 
             $days = array_flip($days);
             $keys = array_keys($this->blocks_map);
@@ -563,7 +660,7 @@
                 $addf .= ', `flags`';
 
             // DEFAULT FORMAT OCHLV!!!
-            $query = "INSERT IGNORE INTO {$this->table_name} (`ts`, `open`, `close`, `high`, `low`, `volume` $addf)\n";
+            $query = "INSERT INTO {$this->table_name} (`ts`, `open`, `close`, `high`, `low`, `volume` $addf)\n";
             $query .= 'VALUES  '.implode(",\n", $values)."\n";
             $query .= "ON DUPLICATE KEY UPDATE high = VALUES(high), low = VALUES(low), close = VALUES(close), volume = VALUES(volume);\n";            
             
@@ -598,12 +695,15 @@
         protected function ScanIncomplete(int $end) {        
             global $chdb;
             $mysqli_df = sqli_df();            
+            $mgr = $this->get_manager();
             // TODO: add table with known voids, due exchange maintenance or other reasons
-            $tmp = $this->manager->tmp_dir;
+            $tmp = $mgr->tmp_dir;
             $voids = [];                        
             $daily_map = $this->daily_map;
-            if (0 == count($this->daily_map))
-                $daily_map = $this->LoadDailyCandles($this->default_limit, true);            
+
+            if (0 == count($this->daily_map)) 
+                $this->daily_map = $daily_map = $this->LoadDailyCandles($this->default_limit, true);
+           
 
             $count_map = [];
             
@@ -615,9 +715,9 @@
             $total_count = $mysqli_df->select_value('COUNT(*)', $this->table_name);
             $total_days = 0;
             // только учтенные данные в БД, которые могли загрузиться не полностью
-            if ($total_count > 0) {                                  
+            if ($total_count > 0) {  // для оптимизации, этот запрос можно выполнять раз в день, остальные - из статистики                                 
                 $mysqli_df->raw_rows = [];
-                $count_map = $mysqli_df->select_map('DATE(ts) as date, COUNT(*) as count, SUM(volume) as volume', 
+                $count_map = $mysqli_df->select_map('DATE(ts) as date,MIN(ts) as day_start, MAX(ts) as day_end, COUNT(*) as count, SUM(volume) as volume', 
                                                 $this->table_name, "GROUP BY DATE(ts)", MYSQLI_OBJECT); // select full history map, possible 10 years = 3650+ entries
                 $total_days = count($count_map);
                 if (0 == $total_days)
@@ -625,6 +725,9 @@
                                                         var_export($mysqli_df->raw_rows, true));  
                 $mysqli_df->raw_rows = null;
             }
+
+            
+            $stats = $mysqli_df->select_map('date, day_start, day_end, count_minutes as count, volume_minutes as volume, volume_day, repairs', $this->stats_table, '', MYSQLI_OBJECT);
 
             $dump = [];
             foreach ($count_map as $date => $row) 
@@ -652,25 +755,30 @@
             }
 
             log_cmsg("~C96#PERF_SCAN:~C00 scaning for voids in %s, exists %d candles, count map size = %d, daily candles %d",
-                        $this->table_name,  $total_count, $total_days, count($this->daily_map));
+                        $this->table_name,  $total_count, $total_days, count($daily_map));
             if (count($removed) > 0)
                 log_cmsg("~C31#WARN:~C00 for %s due no daily candles removed %d / %d blocks", 
                             $this->symbol, count($removed), $prev_count);
-            $today = floor_to_day(time());
+            $today_t = floor_to_day(time());
             $verbose = 0;
             if (0 == count ($count_map))
                 $verbose = 3;
             
+            $scan_start = time();    
             $scan_map = $this->daily_map;
             $fill_map = [];
+            $total_volume = 0;
+            $total_volume_ch = 0;
+
             krsort($scan_map); // from oldest to newest
             foreach ($scan_map as $cursor => $row) {                
-                if ($today <= $cursor) continue;   // skip today due is for last block               
-
+                if ($today_t <= $cursor) continue;   // skip today due is for last block        
+                $elps = time() - $scan_start;
+                if (!$mgr->active || $elps >= 60) break;  // stop signal maybe                  
                 // 0:open, 1:close, 2:high, 3:low, 4:volume
                 if (count( $row) > 5)  // is row full and include timestamp -> cutting??
                     log_cmsg("~C31#WARN:~C00 excess column in daily candle %s: %s?", $this->symbol, json_encode($row));                                    
-                $ts = date('Y-m-d', $cursor);
+                $day = date('Y-m-d', $cursor);
                 if (!isset($row[CANDLE_OPEN]) || !isset($row[CANDLE_VOLUME])) 
                     throw new ErrorException("~C91#FATAL:~C00 wrong candle ".var_export($row, true ));
                 $day_vol = $row[CANDLE_VOLUME]; 
@@ -679,56 +787,103 @@
                 $volume = 0;
                 $count = 0;
                 
-                $eod = "$ts 23:59:59";
+                $eod = "$day 23:59:59";
                 $exists = false;
-                if (isset($count_map[$ts]))  {
+                $srec = null;
+                if (isset($stats[$day]))
+                    $srec = $stats[$day];                  
+
+                if (isset($count_map[$day]))  {
                     $exists = true;
-                    $count  = $count_map[$ts]->count;
-                    $volume = $count_map[$ts]->volume;
+                    $drec = $count_map[$day];                    
+                    $drec->repairs = 0;
+                    $count  = $drec->count;
+                    $volume = $drec->volume;
+                    $total_volume += $volume;
+
+                    if (null === $srec) {                        
+                        $stats[$day] = $srec = $drec;
+                        $row = sprintf("('%s', '%s', '%s', %d, %s, %s)", 
+                                        $day, $srec->day_start, $srec->day_end, $srec->count, $srec->volume, $day_vol);
+                        $mysqli_df->insert_into($this->stats_table, "date, day_start, day_end, count_minutes, volume_minutes, volume_day", $row);
+                    }
+                } elseif (null === $srec) {
+                    $srec = new stdClass();
+                    $srec->volume = 0;
+                    $srec->count = 0;
+                    $srec->volume_day = $day_vol;
+                    $srec->repairs = 0;
                 }
+
                 $close = 0;                
-                $fill_map [$cursor] = $count;
-                
+                $fill_map [$cursor] = $count;               
                 
                 if ($count > 0) 
                     $close = $mysqli_df->select_value('close', $this->table_name, "WHERE ts <= '$eod' ORDER BY `ts` DESC"); 
 
                 $diff = $day_vol - $volume;
-                if ($verbose > 1)
-                    log_cmsg("~C94#CHECK_DBG:~C00 day %s candle: %s", $ts, json_encode($row));
+                $diff_pp = 100 * $diff / max($day_vol, $volume, 0.01);
 
-                if (abs($diff) > $day_vol * 0.001 || $close != $day_close) {  // only fake candles or incomplete                    
+                $close_diff = $day_close - $close;
+                $close_diff_pp = 100 * $close_diff / max($day_close, $close, 0.01);
+                
+                if ($verbose > 1)
+                    log_cmsg("~C94#CHECK_DBG:~C00 day %s candle: %s, repairs %d", $day, json_encode($row), $srec->repairs);
+
+                if ($srec->repairs > 1) continue; // данные биржи не совпадают основовательно для разных ТФ, перезагружать смысла нет 
+
+                // валидация с загрублениями, т.к. биржи отдают иногда не полные данные, усложняющие вертикальную валидацию
+                if (abs($diff_pp) > $this->volume_tolerance || abs($close_diff_pp) > 0.15) {  // only fake candles or incomplete                    
                     if ($cursor < EXCHANGE_START_SEC) {
                         log_cmsg("~C91#WARN_OUTBOUND:~C00 have fake data in DB for %s %s?", $this->symbol, color_ts($cursor));
                         continue;
                     }
                     $result ++;                   
-
-                    if ($close != $day_close && $exists)
+                    $need_clean = true;
+                    if ($close != $day_close && $exists) 
                         $msg = format_color ("~C33#WRONG_DATA:~C00 for %s have close %f but day candle %s have different. Volume diff %s",
-                                             $ts, $close, json_encode($row), format_qty($diff));                                    
+                                             $day, $close, json_encode($row), format_qty($diff));                                    
                     elseif ($volume > $day_vol * 1.001) {                                              
                         $msg = format_color ("~C31#EXCESS_DATA:~C00 may be wrong instrument was mixed in table. Volume %s > %s (diff = %s) for %s", 
-                                             format_qty($volume), format_qty($day_vol), format_qty($diff), $ts);                        
+                                             format_qty($volume), format_qty($day_vol), format_qty($diff), $day);                        
                     }
-                    else
-                        $msg = format_color ("~C04~C97#INCOMPLETE_CHECK({$this->ticker}):~C00  for %s have volume %s in %d candles instead %s (diff %s).",
-                                             $ts, format_qty($volume),
-                                             $count, format_qty($day_vol), format_qty($diff));                                           
+                    else {
+                        $msg = format_color ("~C04~C97#INCOMPLETE_CHECK({$this->ticker}):~C00  for %s have volume %s in %d candles instead %s (diff %s %.2f%%).",
+                                             $day, format_qty($volume),
+                                             $count, format_qty($day_vol), format_qty($diff), $diff_pp);                                           
+                        // $need_clean = false;                                             
+                    }
                     
                     log_cmsg($msg);
-                    file_add_contents("$tmp/recovery-{$this->ticker}.log", tss()." $msg\n");
-                    if ($block && $block->covers($cursor)) {
-                        $block->target_volume += $day_vol; 
-                        continue;                    
-                    }
-                    if ($this->BlocksCount() >= 200) break;
+                    file_add_contents("$tmp/recovery-{$this->ticker}.log", tss()." $msg\n");           
 
-                    $cursor = floor_to_day($cursor); 
-                    $rb = $cursor + $this->days_per_block * SECONDS_PER_DAY - 1;                                        
-                    $block = $this->CreateBlock( $cursor, $rb);                    
-                    $block->target_volume = $day_vol;                     
+                    /* Этот вариант оптимизации использовать нельзя, если возможны несоответствия данных и ремонт, т.к. статистическая привязка - 1 день! 
+                    $next_day = $cursor + SECONDS_PER_DAY;                                               
+                    if ($block && $block->lbound == $next_day) {
+                        // сканирование производится в прошлое, поэтому блоки расширять можно лишь влево.
+                        // проверка на расширение блока, до максимального числа дней. 
+                        $days = round(($block->rbound - $block->lbound) / SECONDS_PER_DAY);                        
+                        if ($days < $this->days_per_block) {                             
+                            $block->lbound = $cursor;
+                            $block->target_volume += $day_vol; 
+                            $block->avail_volume += $volume;
+                            $block->key = $day;
+                            $block->db_need_clean |= $need_clean;
+                            log_cmsg("~C94#DBG:~C00 block %s extended left to %d days and now start from %s, target volume rised to %s", 
+                                        $this->ticker, $days + 1, $day, format_qty($block->target_volume));
+                            continue;                    
+                        }
+                    } // */
+
+                    if ($this->BlocksCount() >= 200) break;
+                    // по умолчанию создается блок в один день
+                    $cursor = floor_to_day($cursor);                     
+                    $eod = $cursor + SECONDS_PER_DAY - 1; // end of                                     
+                    $block = $this->CreateBlock( $cursor, $eod);                    
+                    $block->target_volume = $day_vol; 
+                    $block->avail_volume = $volume;                    
                     $block->recovery = true;                    
+                    $block->stat_rec = $srec;
                     
                     $voids []= sprintf('%d %s => %s, TV = %f', $alloc, color_ts( $block->lbound), color_ts( $block->rbound), $day_vol);
                     $alloc ++;
@@ -739,33 +894,14 @@
                         $this->blocks = array_values($this->blocks_map);
                         continue;
                     }                    
-                    
-                    if ($exists && $this->BlocksCount() < $this->max_blocks) {                    
-                        // remove for reliable overwrite
-                        $query = "DELETE FROM {$this->table_name} WHERE DATE(`ts`) = '$ts'";                        
-                        $msg = '';                   
-                        $res = $mysqli_df ->try_query($query); // remove excess data                    
-                        $data_info = $res ? format_color("Removed %d candles from MySQL", $mysqli_df->affected_rows) : "~C91Failed remove exist data: ~C00{$mysqli_df->error}";                        
-                    
-                        if ($chdb)
-                            try {
-                                $stmt = $chdb->write($query);
-                                if (!is_object($stmt) ||$stmt->isError())
-                                    log_cmsg("~C91#ERROR:~C00 query failed on ClickHouse: %s", $stmt->dump());
-                                elseif (is_object($stmt))
-                                    $data_info .= ", from ClickHouse some rows removed";
-                            } 
-                            catch (Exception $e) {
-                                log_cmsg("~C91#ERROR:~C00 query failed on ClickHouse: %s", $e->getMessage());
-                            }
-                        $data_info .= ', planned for reload';
-                        log_cmsg("~C93#BLOCK_CLEAN:~C00 $data_info ");
-                    }                    
-                    
+                    $block->db_need_clean = $need_clean;
                 }                 
-                elseif (isset($this->blocks_map[$ts])) {
-                    log_cmsg("~C92 #FILLED_GOOD:~C00 block at %s not need for reload, volume = %s, close = %f", $ts, format_qty($day_vol), $close);
-                    unset($this->blocks_map[$ts]);
+                elseif (isset($count_map[$day])) {
+                    if ($verbose > 2)
+                        log_cmsg("~C92 #FILLED_GOOD:~C00 block at %s not need for reload, volume = %s, close = %f", $day, format_qty($day_vol), $close);                    
+                    if ($elps < 20)
+                        $total_volume_ch += $this->SyncClickHouse($day, $count_map[$day]);
+                    unset($this->blocks_map[$day]);
                 }                
                 elseif ($verbose > 2) 
                     log_cmsg("~C31#SKIP:~C00 ????");
@@ -774,6 +910,9 @@
             ksort($fill_map);
             $fill_str = '~C43~C30[';
             foreach ($fill_map as $t => $count)  {
+                if (1 == date('d', $t))  // format moths as rows
+                    $fill_str .= "\n\t";
+
                 if ($count >= 1440)
                     $fill_str .= '█';
                 elseif ($count >= 1000)
@@ -785,9 +924,10 @@
                 else
                     $fill_str .= '◦';
             }
-            $fill_str .= ']~C40';
+            $fill_str .= ']~C40;';
 
-            log_cmsg("~C97#BLOCKS_CHECK: total incomplete %d, %s", count($this->blocks), $fill_str);
+            log_cmsg("~C97#BLOCKS_CHECK_SUMMARY:~C00 total incomplete %d, total volume %s (ClickHouse %s), F:\n\t%s",
+                        count($this->blocks), format_qty($total_volume), format_qty($total_volume_ch), $fill_str);
             $vcnt = count($voids);
 
             if ($vcnt > 0) {
@@ -802,6 +942,77 @@
 
             return  $result;
         }
+
+
+        protected function SyncClickHouse(string $day, object $target): float {
+            global $chdb;            
+            if (!is_object($chdb) || isset($this->sync_map[$day])) return 0;            
+            $this->sync_map[$day] = 1;
+            $table_name = $this->table_name;
+            $table_qfn = DB_NAME.".$table_name";
+            $query = "SELECT DATE(ts) as date, COUNT(*) as count, SUM(volume) as volume FROM $table_name FINAL\n";
+            $query .= "WHERE DATE(ts) = '$day' GROUP BY DATE(ts)";
+            $stmt = $chdb->select($query);
+            if (is_object($stmt) && !$stmt->isError()) {
+                $row = $stmt->fetchOne();
+                if (!is_array($row)) {
+                    log_cmsg("~C31#WARN:~C00 no data for %s in ClickHouse:$table_qfn: %s", $day, $stmt->dump());
+                    goto RESYNC;
+                }
+                $vdiff = $row['volume'] - $target->volume;
+                $vdiff_pp = 100 * $vdiff / max($row['volume'], $target->volume, 0.1);
+                if ($row['count'] == $target->count && abs($vdiff_pp) < 0.01) {
+                    if ($vdiff_pp != 0)
+                        log_cmsg("~C92#SYNC_OK:~C00 for %s ClickHouse:$table_qfn, volume diff = %5.2f%% relative %s", 
+                                    $day, $vdiff_pp, format_qty($target->volume));
+                    return $row['volume'];
+                }
+                else
+                    log_cmsg("~C31#SYNC_NEED:~C00 for %s ClickHouse:$table_qfn, count %d vs MySQL %d  volume diff = %5.2f%% relative %s",
+                                    $day, $row['count'], $target->count, $vdiff_pp, format_qty($target->volume), );
+            }
+RESYNC:      
+            $query = '-';
+            $mgr = $this->get_manager();
+            $tmp_dir = $mgr->tmp_dir;
+            try {
+                $chdb->write("DELETE FROM $table_name WHERE DATE(ts) = '$day'"); // remove old data
+                $mysqli_df = sqli_df();
+                $cols = 'ts, open, close, high, low, volume, flags';
+                $source = $mysqli_df->select_rows($cols, $table_name, "WHERE DATE(ts) = '$day'", MYSQLI_ASSOC);
+                if (!is_array($source) || 0 == count($source)) {
+                    log_cmsg("~C31#WARN_EMPTY_RES:~C00 no data for %s in MySQL.$table_name: %s", $day, $mysqli_df->error);
+                    return 0;
+                }
+
+                $cols = str_replace(' ', '', $cols);
+                $cl = explode(',', $cols);
+                $rows = [];
+                $volume = 0;
+                foreach ($source as $row) {
+                    $sr = $mysqli_df->pack_values($cl, $row, "'");
+                    $volume += $row['volume'];
+                    $rows []= "($sr)";
+                }
+                $query = "INSERT INTO $table_name ($cols) VALUES\n ";
+                $query .= implode(",\n", $rows)."\n";
+                $stmt = $chdb->write($query);                              
+                if (is_object($stmt) && !$stmt->isError()) {
+                    $stat = LoadQueryStats($chdb, $table_qfn, 1);
+                    log_cmsg("~C93#SYNC_COMPLETE:~C00 for %s ClickHouse:.$table_qfn, stats: %s ", $day, json_encode($stat));
+                    return $volume;
+                }
+                else
+                    log_cmsg("~C31#SYNC_FAIL:~C00 for %s ClickHouse.$table_name", $day);
+            } 
+            catch (Exception $E) {
+                $fname = "$tmp_dir/failed_sync-{$this->ticker}.sql";
+                file_put_contents($fname, $query);
+                log_cmsg("~C91#EXCEPTION(SyncClickHouse):~C00 first row %s (full query in %s), message %s from: %s", $rows[0], $fname,
+                            $E->getMessage(), $E->getTraceAsString());
+            }  
+            return 0;         
+        } // SyncClickHouse
 
     } // class CandleDataFeed
 

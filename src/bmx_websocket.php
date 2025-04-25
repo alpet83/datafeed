@@ -18,8 +18,7 @@
         $url = "wss://ws.bitmex.com/realtime?".http_build_query($params);
         log_cmsg ("~C97#WS_CREATE:~C00 using %s", $url);
         parent::__construct($url, $config);           
-        if (isset($this->socket) && is_resource($this->socket)) {
-            // $result = stream_set_blocking($this->socket, true);;
+        if (isset($this->socket) && is_resource($this->socket)) {            
             $result = stream_set_read_buffer($this->socket, 1048576); 
             log_cmsg("~C93 #WS_CONFIG:~C00 set socket read buffer: %s", 0 == $result ? 'OK': "~C91 $result");            
         }

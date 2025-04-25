@@ -29,6 +29,7 @@ use Dom\Element;
         protected function  CreateWebsocket()  {
             $this->ws = new BitfinexClient(2);
             $this->ws_connect_t = time();
+            $this->ws_active = false;
         }     
         
 
@@ -117,14 +118,17 @@ use Dom\Element;
                 }
                 else    
                     log_cmsg("~C31 #WS_SUBCRIBE_UNKNOWN:~C00 confirmed for %s @ #%d \n", $sym, $id);
-            } // on subscribe
+            } // on subscribe            
             elseif ('info' == $event && isset($data->platform)) {
                 log_cmsg("~C97 #WS_CONNECT~C00: %s", print_r($event, true));
                 $this->platform_status = $data->platform->status;                
+
                 if (1 == $data->platform->status) {
                     $this->ws_active = true;
                     $this->SubscribeWS();
                 }
+                else
+                    log_cmsg("~C31 #WS_PROBLEM:~C00 platform status %d", $data->platform->status);
             }
             else
                 log_cmsg("~C94 #WS_EVENT:~C00 %s: %s", $event, print_r($data, true));

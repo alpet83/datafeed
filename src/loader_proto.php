@@ -181,10 +181,10 @@
                 $result &= $exists || $this->ProcessTemplate($mysqli_df, $ch_proto, $search, $this->table_name);
             }
             elseif ($chdb) {
-                $stmt = $chdb->select("SHOW TABLE LIKE '{$this->table_name}'");
+                $stmt = $chdb->select("SHOW TABLES LIKE '{$this->table_name}'");
                 $exists = false;
-                if ($stmt && !$stmt->isError())
-                    $exists = $stmt->count() > 0;                                     
+                if ($stmt && !$stmt->isError())                     
+                    $exists = $stmt->count() > 0;                                                     
                 $result &= $exists || $this->ProcessTemplate($chdb, $ch_proto, $search, $this->table_name); 
             }
             $mysqli_df->try_query("COMMIT;\n");            

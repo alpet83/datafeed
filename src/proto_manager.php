@@ -261,7 +261,7 @@
             if ('all' !== $symbol) 
                 $strict = "AND TM.symbol = '$symbol'";
             $mixer = "INNER JOIN $tm_table AS TM ON `id_ticker` = `id` WHERE `$column` > 0 $strict ORDER BY symbol";                  
-            $res = $mysqli->select_map("pair_id, ticker, symbol,`$column` as enabled", $table_cfg, $mixer, MYSQLI_OBJECT);            
+            $res = $mysqli->select_map("pair_id, ticker, symbol,`$column` as enabled, id_ticker", $table_cfg, $mixer, MYSQLI_OBJECT);            
             if (is_array($res) && count($res) > 0)                           
                 log_cmsg("~C93 #DBG:~C00 enabled for download symbols: [%s]", json_encode( $res));              
             else {
@@ -279,10 +279,11 @@
             $this->ws_connect_t = time();
             log_cmsg("~C91 #WS_WARN:~C00 WebSocket reconnect due %s, realtime loaders %d", $reason, count($loaders));
             $this->ws_reconnects ++;
-            if (5 == $this->ws_reconnects % 10) 
-                $this->CreateWebsocket();
-            else
-                $this->ws->reconnect();
+            $this->ws_active = false;            
+            if (is_object($this->ws))
+                $this->ws->close();
+
+            $this->CreateWebsocket();            
             $this->subs_map = [];
             $this->platform_status = -1; // means unknown
             $this->ready_subscribe = time() + 10;
@@ -336,9 +337,6 @@
                 // log_cmsg("~C03~C33 #REST_SKIP({$this->cycles}/$pair_id):~C00 allowed ts = %s", format_TS( $rest_allowed_t));
                 return true; // using last minutes for unban         
             }
-        
-            if ($elps > $downloader->normal_delay && $downloader->BlocksCount() > 0 || !$downloader->newest_ms)                  
-                log_cmsg("~C33 #OUTDATED($elps):~C00  symbol %s, rest blocks  %d, last_ts %s", $sym, $downloader->BlocksCount(),  $last_tss);
 
             $downloader->RestDownload();   // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< main work                  
             return true;
@@ -549,8 +547,10 @@
                     } catch (Throwable $E) {
                         log_cmsg("~C31 #EXCEPTION:~C00 while trying ping WebSocket: %s", $E->getMessage());
                         $this->ws_stats ['exceptions'] = ($this->ws_stats ['exceptions'] ?? 1) + 1; 
-                        if ($elps >= 60) 
+                        if ($elps >= 60 || $this->ws_stats ['exceptions'] > 5)  {
                             $this->ReconnectWS('ping failed / connection lost');
+                            $this->ws_stats ['exceptions'] = 0;
+                        }
                     }                 
             }     
             
