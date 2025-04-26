@@ -184,7 +184,7 @@
 
         protected  $stats_table = '';
 
-        protected  $volume_tolerance = 0.01;  // in % for block completion
+        
         
         private    int $lazy_rcv = 0;        
 
@@ -910,8 +910,8 @@
             ksort($fill_map);
             $fill_str = '~C43~C30[';
             foreach ($fill_map as $t => $count)  {
-                if (1 == date('d', $t))  // format moths as rows
-                    $fill_str .= "\n\t";
+                if (1 == date('d', $t))  // format months as rows
+                    $fill_str .= "~C49~C33+ \n\t~C43~C30";
 
                 if ($count >= 1440)
                     $fill_str .= '█';
@@ -953,14 +953,16 @@
             $query = "SELECT DATE(ts) as date, COUNT(*) as count, SUM(volume) as volume FROM $table_name FINAL\n";
             $query .= "WHERE DATE(ts) = '$day' GROUP BY DATE(ts)";
             $stmt = $chdb->select($query);
+            $avail_volume = 0;
             if (is_object($stmt) && !$stmt->isError()) {
                 $row = $stmt->fetchOne();
                 if (!is_array($row)) {
                     log_cmsg("~C31#WARN:~C00 no data for %s in ClickHouse:$table_qfn: %s", $day, $stmt->dump());
                     goto RESYNC;
                 }
-                $vdiff = $row['volume'] - $target->volume;
-                $vdiff_pp = 100 * $vdiff / max($row['volume'], $target->volume, 0.1);
+                $avail_volume = $row['volume'];
+                $vdiff = $avail_volume - $target->volume;
+                $vdiff_pp = 100 * $vdiff / max($avail_volume, $target->volume, 0.1);
                 if ($row['count'] == $target->count && abs($vdiff_pp) < 0.01) {
                     if ($vdiff_pp != 0)
                         log_cmsg("~C92#SYNC_OK:~C00 for %s ClickHouse:$table_qfn, volume diff = %5.2f%% relative %s", 
@@ -976,7 +978,11 @@ RESYNC:
             $mgr = $this->get_manager();
             $tmp_dir = $mgr->tmp_dir;
             try {
-                $chdb->write("DELETE FROM $table_name WHERE DATE(ts) = '$day'"); // remove old data
+                if ($avail_volume > $target->volume)  {
+                    log_cmsg("~C31#PERF_WARN:~C00 cleanup excess data, removing all for day %s from ClickHouse table", $day);                    
+                    $chdb->write("DELETE FROM $table_name WHERE DATE(ts) = '$day'"); // remove old data
+                }
+
                 $mysqli_df = sqli_df();
                 $cols = 'ts, open, close, high, low, volume, flags';
                 $source = $mysqli_df->select_rows($cols, $table_name, "WHERE DATE(ts) = '$day'", MYSQLI_ASSOC);

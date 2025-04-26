@@ -133,7 +133,6 @@
         protected   $minute = 0;
         
 
-        protected   $common_db = true;
 
         protected   $db_name = 'datafeed';
 
@@ -147,10 +146,9 @@
         
         public function __construct(string $symbol, string $data) {            
             $this->create_t = time();                 
-            $db_name = sqli()->query("SELECT DATABASE()")->fetch_column(0);
-            $this->common_db =  'datafeed' == $db_name;            
-            if ($this->common_db)
-                log_cmsg("~C31#WARN:~C00 using common config DB");
+            $db_name = sqli()->query("SELECT DATABASE()")->fetch_column(0);                    
+            if ('datafeed' == $db_name)
+                throw new Exception ("FATAL: attempt using active DB `datafeed` for data");
 
             foreach (['ticker_map', 'data_config'] as $suffix)
                 if (!isset($this->tables[$suffix])) 
@@ -346,17 +344,14 @@
             global $rest_allowed_t;             
             $this->cycles ++; 
             $this->cycle_start = time();
-
             $uptime = time() - $this->create_t;
             if (!$this->SelfCheck()) return;
-
 
             $rtm = $this->GetRTMLoaders();
             if (!is_object($this->ws) && $uptime >= 10 && count($rtm) > 0) {
                 log_cmsg("~C97 #WS_INFO:~C00 Switching to WebSocket update, cycles = %d uptime = %d", $this->cycles, $uptime);
                 $this->CreateWebsocket();  // switch RTM download
-            }
-            
+            }            
             
             $ws_lag = time() - $this->last_ping;            
             $ws_elps = time() - $this->ws_recv_last;
@@ -367,7 +362,7 @@
             $total_blocks = 0;
             if ($minute <= 58.5 && time() > $rest_allowed_t) 
                 foreach ($this->loaders as $pair_id => $loader) {                                 
-                    if (!($loader instanceof BlockDataDownloader) ||$loader->data_flags & 0x001 == 0) continue;        
+                    if (!($loader instanceof BlockDataDownloader) || $loader->data_flags & DL_FLAG_HISTORY == 0) continue;        
                     $total_blocks += $loader->BlocksCount();
                     $data_lag = time() - max($loader->last_block->max_avail, $loader->ws_newest);
                     if ($loader->loaded_full() && $data_lag < 300) {
@@ -583,8 +578,6 @@
         abstract protected function SubscribeWS();
 
         public function TableName(string $suffix): string {
-            if ($this->common_db)
-                return strtolower(  "{$this->exchange}__$suffix");            
             return (sqli()->active_db() == $this->db_name) ? $suffix : "{$this->db_name}.$suffix";
         }
 

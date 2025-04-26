@@ -2,7 +2,7 @@
 
     class DataBlock implements Countable, ArrayAccess {
 
-        public  int $index = -1;
+        public  int $index = -1000;
         public  $key = '';  // in map
         public  int $lbound = 0;
         public  int $rbound = 0;
@@ -153,6 +153,12 @@
             return $this->lbound <= $tss && $tss <= $this->rbound; // rbound can be next day
         }
 
+        public function DataDensity(): float {
+            $m_range = ($this->newest_ms() - $this->oldest_ms()) / 60000;
+            $count = count($this);
+            return $m_range > 0 ? $count / $m_range : 0;            
+        }
+
         public function Export(float $filter = 0): array {
             return $this->cache_map; // clone
         }
@@ -237,20 +243,16 @@
 
 
         protected function  get_lbound_ms() { return $this->lbound * 1000;  }
-        protected function  get_rbound_ms() { return $this->rbound * 1000 + 999;  }        
+        protected function  get_rbound_ms() { return $this->rbound * 1000 + 999;  }          
 
-   
+        public function first() { return $this->cache_map[$this->firstKey()] ?? null;  }
+        public function firstKey(): mixed { return array_key_first($this->cache_map); }           
 
-        public function first() {
-            return $this->cache_map[$this->firstKey()] ?? null;
-        }
-        public function firstKey(): mixed {
-            return array_key_first($this->cache_map);                           
-        }           
+        public function get_keys(): array { return array_keys($this->cache_map);    }
 
-        public function get_keys(): array {
-            return array_keys($this->cache_map);
-        }
+        public function IsEmpty(): bool { return BLOCK_CODE::NOT_LOADED == $this->code && 0 == count($this); }
+
+        public function IsFull(): bool { return BLOCK_CODE::FULL == $this->code; }
 
         public function IsFullFilled(): bool {
             $required = $this->min_fills;
@@ -262,12 +264,10 @@
             return false;
         }
 
-        public function last() {
-            return $this->cache_map[$this->lastKey()] ?? null;
-        }
-        public function lastKey(): mixed {
-            return array_key_last($this->cache_map);                           
-        }
+        public function IsVoid(): bool { return BLOCK_CODE::VOID == $this->code;}
+
+        public function last() { return $this->cache_map[$this->lastKey()] ?? null;  }
+        public function lastKey(): mixed {  return array_key_last($this->cache_map); }
 
         public function newest_ms(): int {
             verify_timestamp($this->max_avail, 'from block->newest_ms');
@@ -306,6 +306,8 @@
             $this->cache_map = [];
             $this->max_avail = $this->lbound;
             $this->min_avail = $this->rbound;
+            $this->last_fwd = $this->lbound_ms - 1;
+            $this->last_bwd = $this->rbound_ms + 1;
         }
 
         public function SaldoVolume(): float {

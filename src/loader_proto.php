@@ -144,7 +144,6 @@
         public function __construct(DownloadManager $mngr, \stdClass $ti)
         {                        
             $this->tables = $mngr->GetTables(); // copy tables from manager           
-
             $this->exchange = $mngr->exchange;
             $this->manager = $mngr;
             $this->ticker = $ti->ticker;
@@ -187,7 +186,10 @@
                     $exists = $stmt->count() > 0;                                                     
                 $result &= $exists || $this->ProcessTemplate($chdb, $ch_proto, $search, $this->table_name); 
             }
-            $mysqli_df->try_query("COMMIT;\n");            
+
+            $query = file_get_contents('download_schedule.sql'); // make scheduler table
+            $mysqli->try_query($query);
+            $mysqli_df->try_query("COMMIT;\n");                            
             return $result;
         }
 
