@@ -44,7 +44,7 @@
             parent::__construct($mgr, $ti);            
             $this->CreateTables();                
             $this->RegisterSymbol('ticks', $this->pair_id);                
-            $this->default_limit = 1000;
+            $this->default_limit = 10000;
         }
 
         public function HistoryFirst(): bool|int {            

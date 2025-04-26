@@ -461,6 +461,8 @@
                 $raw_data[$symbol] = [];
 
             foreach ($res as $rec) {
+                if (!is_object($rec)) 
+                    throw new Exception("~C91#ERROR:~C00 invalid record type ".var_export($rec, true));
                 $symbol = $rec->symbol;                
                 if (isset($rec->open) && isset($map[$symbol])) 
                     $raw_data [$symbol][] = $rec;

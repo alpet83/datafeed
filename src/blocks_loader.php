@@ -231,7 +231,13 @@ SKIP_DOWNLOAD:
             $table_name = $this->table_name;
             $this->table_create_code = null;            
             
-            log_cmsg("~C97#CORRECT_TABLE:~C00 checking problems for %s ", $table_name);
+            // TODO: Not RC. removing obsolete tables
+            $query = sprintf("DROP TABLE iF EXISTS `%s.%s__%s`", DB_NAME, $this->data_name, $this->ticker);
+            $mysqli_df->try_query($query);
+            $query = sprintf("DROP TABLE iF EXISTS `__%s`", $this->ticker);
+            $mysqli_df->try_query($query);
+
+            log_cmsg("~C97#CORRECT_TABLE:~C00 checking problems for `%s` ", $table_name);
             $table_code = null;
 
             if ($mysqli->table_exists($table_name)) {
@@ -832,7 +838,7 @@ SKIP_CHECKS:
 
             
             $block->last_api_request = $this->last_api_request;
-            $data = json_decode($res, JSON_NUMERIC_CHECK);            
+            $data = json_decode($res, false);            
             if (false !== strpos($res, 'error') || !is_array($data))  {
                 log_cmsg("~C91#WARN: API request failed with response: %s", $res); // typical is ratelimit errro
                 return null;

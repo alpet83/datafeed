@@ -93,7 +93,7 @@
                 }
                 $key = $this->candle_key($t);
                 $this->candle_map[$key] = $candle;
-                $this->filled_vol[$key] = $candle[CANDLE_VOLUME];
+                $this->filled_vol[$key] = $candle[CANDLE_VOLUME] * 0.995;  // 0.5% объема закладывается как погрешность, чтобы быстрее фиксировать заполнение минуты
             }
 
             $vol_map = $mysqli_df->select_map("(toHour(ts) * 60 + toMinute(ts)) as minute, SUM(amount) as volume", $table, 
@@ -101,9 +101,11 @@
             $abnormal = 0;
             foreach ($vol_map as $m => $v) {
                 if (!isset($this->filled_vol[$m])) continue;                                
-                if ($v > $this->filled_vol[$m] * 1.01) 
+                if ($v > $this->filled_vol[$m] * 1.05) 
                     $abnormal ++;
                 $this->filled_vol[$m] -= $v;    // для этой минуты тики загружены хотя-бы частично                
+                if (!$this->TestUnfilled($m)) 
+                    unset($this->filled_vol[$m]); // сокращение работы
             }
             if (count($this->filled_vol) > 0) // hundreds means - candles possible wrong loaded
                 log_cmsg("~C96#PERF:~C00 need refill ticks for %d minutes in range %s .. %s ", 
@@ -182,9 +184,15 @@
             return $stored;
         }
 
+        protected function TestUnfilled($m) {
+            // $cm = $this->candle_map[$m] ?? [0, 0, 0, 0, 0];
+            // $mv = $cm[CANDLE_VOLUME];
+            return $this->filled_vol[$m]  > 0; 
+        } 
+
         public function UnfilledAfter(): int {
             foreach ($this->filled_vol as $key => $v)
-                if ($v > 0) {
+                if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key);
                     if ($tms <= $this->last_fwd) continue; // предотвращение повторных результатов
                     if ($tms >= $this->lbound_ms) return $tms;
@@ -196,12 +204,13 @@
 
         public function UnfilledBefore(): int {         
             $rv = array_reverse($this->filled_vol, true); // need maximal key
-            foreach ($rv as $key => $v) 
-                if ($v > 0) {
+            foreach ($rv as $key => $v) {                
+                if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key + 1); // download need from next minute
                     if ($tms >= $this->last_bwd) continue; // предотвращение повторных результатов
                     return $tms;
                 }
+            }
             return parent::UnfilledBefore(); 
         }
         public function VoidLeft(string $unit = 's'): float {
