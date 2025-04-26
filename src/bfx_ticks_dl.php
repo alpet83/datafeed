@@ -86,9 +86,8 @@
                         log_cmsg("~C31#WARN_OUTBOUND: ~C00 tick timestamp %s < EXCHANGE_START", color_ts($t));
                         continue;
                     }                    
-                    $ts = $this->TimeStampEncode($t);                    
                     $amount = $rec[IDX_AMOUNT];                    
-                    $result->AddRow($ts, $amount > 0, $rec[IDX_PRICE],  abs($amount), $rec[IDX_TID]);                    
+                    $result->AddRow($t, $amount > 0, $rec[IDX_PRICE],  abs($amount), $rec[IDX_TID]);                    
                 }
                 elseif ($n < 10)
                     log_cmsg("~C31#WARN_SKIP_IMPORT($n):~C00 %s from %s ", var_export($rec, true), $source);
