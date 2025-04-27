@@ -61,6 +61,8 @@
         
 
         protected    $cache = null; // cache object, descendant from DataBlock                
+
+        protected    $cache_file_last = '';
         
         protected   $rqs_cache_map = []; // [md5(rqs)] = API response
         protected   $cache_hit = false;
@@ -99,6 +101,7 @@
         protected function api_request(string $url, array $params, int $cache_for = 180): string { // REST API request with typical GET params.
             global $rest_allowed_ts;
             $res = 'fail?'; 
+            $this->cache_file_last = '';
             $fresh_rqs = [];
             $t_now = time();
             foreach ($this->last_requests as $rqt_remove => $rqs)
@@ -137,6 +140,7 @@
             $latest = str_in($rqs_dbg, $today) || $this->IsDynamicRequest($rqs_dbg) || $cache_for <= 0;  
             if (!$latest && file_exists($cache_file)) { // для отладки пока без ограничения времени жизни кэша, это заблокирует обновление для динамических URL!
                 $res = file_get_contents($cache_file);
+                $this->cache_file_last = $cache_file;
                 log_cmsg("\t#PERF_CACHE:~C00 data loaded from %s, size = %d", $cache_file, strlen($res));
                 goto SKIP_DOWNLOAD;
             }
@@ -175,6 +179,7 @@ SKIP_DOWNLOAD:
             $forward = str_in($rqs_dbg, 'reverse=false') || str_in($rqs_dbg, 'sort=1');
             if (!$latest || str_in($rqs_dbg, ':00:00') && $forward) {
                 file_put_contents($cache_file, $res);
+                $this->cache_file_last = $cache_file;
                 $this->rqs_cache_map[$key] = $res; // пригодиться для не отлаженного перезапроса данных
             }
             return $res;
@@ -502,17 +507,7 @@ SKIP_CHECKS:
                     if ($block->loops >= 1500) {
                         $this->last_error = "loop count reach {$block->loops}, probably infinite loop";
                         break;
-                    }
-
-                    $elps = $now - $loop_start;
-                    $cycle_elps = $now - $mgr->cycle_start;
-                    /*
-                    if ($elps > $this->cycle_time * 0.75
-                        || $block->loops > 100 
-                        || $cycle_elps >= $this->cycle_time) {
-                        $this->last_error = sprintf('timeouted elps = %d, cycle_elps %d, loops = %d, ', $elps, $cycle_elps, $block->loops);
-                        break; // не занимать все время общего цикла
-                    } //*/
+                    }                   
 
                     if (!$mgr->active) {
                         $this->last_error = "script going to termination";
@@ -533,18 +528,20 @@ SKIP_CHECKS:
                     if (count($cache) > 0 ) {   
                         // если очень много данных в каждой минутке, округление шага надо снижать. Вопрос в критерии                     
                         $round_step = $last_density >= $this->default_limit ? 1000 * $this->current_interval : $round_max;                       
-                        $oldest_ms = ceil($cache->oldest_ms() / $round_step ) * $round_step;
-                        $newest_ms = floor($cache->newest_ms() / $round_step ) * $round_step;                               
-
-                        if ($newest_ms >= $block->lbound_ms && $block->attempts_fwd > 0)                                       
-                            $after_ms  = min($after_ms, $newest_ms);                                                
-                        if ($oldest_ms < $block->rbound_ms && $block->attempts_bwd > 0) 
-                            $before_ms = max($oldest_ms, $before_ms); // обеспечение непрерывности данных в кэше?
-
+                        $oldest_ms = $cache->oldest_ms();
+                        $newest_ms = $cache->newest_ms();                                                       
+                        $after_ms  = floor($after_ms / $round_step ) * $round_step;
+                        $before_ms = ceil($before_ms / $round_step ) * $round_step;                      
+                        // если в предыдущую минуту было загружено данных с избытком, нужно более прецизионно двигаться по истории
+                        // например, отталкиваться от времени крайней записи в кэше (слева и справа соответственно). 
+                        if ($last_density >= $this->default_limit)  {                                                
+                            $after_ms  = min($after_ms, $newest_ms);                                                                        
+                            $before_ms = max($oldest_ms, $before_ms);                         
+                        }
                         if ($before_ms < EXCHANGE_START) {
                             log_cmsg(" ~C91#ERROR(LoadBlock):~C00  before_ms (%d) = oldest_ms (%d) | block->UnfilledBefore(%d) < EXCHANGE_START for block %s, from cache %s", 
-                                            $before_ms,  $oldest_ms, $block->UnfilledBefore(),
-                                            strval($block), strval($cache));                                                  
+                                        $before_ms,  $oldest_ms, $block->UnfilledBefore(),
+                                        strval($block), strval($cache));                                                  
                             break;
                         }
                         $this->oldest_ms = min($this->oldest_ms, $oldest_ms);    
@@ -582,7 +579,7 @@ SKIP_CHECKS:
                         else
                             $block->attempts_bwd = 0;
                         $info = $block->min_avail > $block->lbound ? sprintf('filled %d up to %s ', $block->fills, color_ts($block->min_avail)) : 'empty';                    
-                        log_cmsg(" ~C34#BLOCK_HEAD_$txt:~C00 block %s $info, requesting left completion before %s, target volume %s", 
+                        log_cmsg(" ~C36 <<< #BLOCK_HEAD_$txt:~C00 block %s $info, requesting left completion before %s, target volume %s", 
                                     $block_id, color_ts($before_ms / 1000), format_qty($block->target_volume));
                     }
                     elseif ( $block->Covers_ms($after_ms) && $block->attempts_fwd < 3 && count($block) > 0) { // $block->rbound - $block->max_avail > 300 &&
@@ -594,7 +591,7 @@ SKIP_CHECKS:
                         }                        
                         else
                             $block->attempts_fwd = 0;
-                        log_cmsg(" ~C36#BLOCK_TAIL_$txt:~C00 block %s filled %d before %s, requesting right completion, target volume %s",  
+                        log_cmsg(" ~C36 >>> #BLOCK_TAIL_$txt:~C00 block %s filled %d before %s, requesting right completion, target volume %s",  
                                         $block_id, $block->filled, format_tms($after_ms), format_qty($block->target_volume));                        
                         $reverse = false;                        
                     }        
@@ -751,6 +748,11 @@ SKIP_CHECKS:
                             $block->info = "cache {$cache->key} covered block by time";
                         }
 
+                        if ($block->loops >= 1500) {
+                            $block->code = count($block) > 0 ? BLOCK_CODE::FULL : BLOCK_CODE::VOID; 
+                            $block->info = "deadlock detected, loop count {$block->loops}";
+                        }
+
                         $lag_left = $block->VoidLeft();
                         $lag_right = $block->VoidRight();
                         if (count($block) > 0 && BLOCK_CODE::NOT_LOADED == $block->code) 
@@ -762,11 +764,13 @@ SKIP_CHECKS:
                         if ($cache_oldest <= $cache_newest)
                             $cache_info = format_color("%s..%s = %.1f min", color_ts($cache_oldest / 1000), color_ts($cache_newest / 1000), 
                                                                           ($cache_newest - $cache_oldest) / 60000);
+                        $left_volume = $block->LeftToDownload();                                                                          
 
-                        log_cmsg("~C96\t\t#BLOCK_SUMMARY({$block->loops})~C00: %5d $data_name downloaded (%7d saldo, %7d in cache) with density %4.1f / minute, accumulated range [$cache_info], block stored range [%s..%s]", 
+                        log_cmsg("~C96\t\t#BLOCK_SUMMARY({$block->loops})~C00: %5d $data_name downloaded (%7d saldo, %7d in cache) with density %4.1f / minute, accumulated range [$cache_info], block stored range [%s..%s], left to download %s", 
                                     count($data), $added, $cache_size, $last_density,
                                     color_ts( $block->min_avail),                                
-                                    color_ts( $block->max_avail));
+                                    color_ts( $block->max_avail),
+                                    format_qty($left_volume));
                     }   // if mini_cache loaded 
                     elseif (is_array($data) ) {
                         if ($block->attempts_bwd > 2 && $block->attempts_fwd > 2) {
@@ -820,12 +824,11 @@ SKIP_CHECKS:
 
             $tag = $block->index < 0 ? '~C40' : '~C04';
             if ($backward_scan)
-                log_cmsg("$tag~C33 #{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s before = %s, attempts <<< %d", 
+                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s before = %s, attempts <<< %d", 
                                 $rqs_dbg, color_ts($tss), $block->attempts_bwd);                       
             else
-                log_cmsg("$tag~C33 #{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s after = %s, attempts <<< %d", 
+                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s after = %s, attempts >>> %d", 
                                 $rqs_dbg, color_ts($tss), $block->attempts_fwd);
-
                                 
             // TODO: ttl config table                                
             $cache_ttl = 180;
@@ -840,7 +843,6 @@ SKIP_CHECKS:
             $elps = pr_time() - $t_start;
             if ($elps > 10)
                 log_cmsg("~C31 #PERF_WARN:~C00 API request time %.1f sec, retrieved %d length string", $elps, strlen($res));
-
             
             $block->last_api_request = $this->last_api_request;
             $data = json_decode($res, false);            
@@ -848,6 +850,10 @@ SKIP_CHECKS:
                 log_cmsg("~C91#WARN: API request failed with response: %s", $res); // typical is ratelimit errro
                 return null;
             }      
+
+            if ($block->index >= 0 && strlen($this->cache_file_last) > 0)
+                $block->cache_files []= $this->cache_file_last; // this file can be deleted after whole block is loaded
+
             if (is_array($data) && $backward_scan)
                 $data = array_reverse($data); // API returns data in reverse order, normalizing  
             elseif (!is_array($data))     

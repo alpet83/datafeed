@@ -8,7 +8,9 @@
         public  int $rbound = 0;
 
         public  int $min_avail = 0; // min available timestamp in block
-        public  int $max_avail = 0; // max available timestamp in block 
+        public  int $max_avail = 0; // max available timestamp in block
+        
+        public  array $cache_files = [];  // cache files (typically JSON) with loaded REST API data
         public  BLOCK_CODE $code;   // 0 - not loaded, 1 - void, 2 - partial, 3 - full
 
         public BLOCK_CODE $reported;
@@ -270,6 +272,10 @@
         public function last() { return $this->cache_map[$this->lastKey()] ?? null;  }
         public function lastKey(): mixed {  return array_key_last($this->cache_map); }
 
+        public function LeftToDownload(): float {
+            return $this->target_volume - $this->SaldoVolume();
+        }
+
         public function LoadedBackward(int $tms, int $near = 60000, bool $add = false): bool {
             if (isset($this->history_bwd[$tms])) return true;
             if ($add) 
@@ -324,13 +330,17 @@
             return $this->min_avail * 1000;        
         }
 
-        public function Reset() {
+        public function Reset(bool $clean_cache = false) {
             $this->fills = 0;
             $this->cache_map = [];
             $this->max_avail = $this->lbound;
             $this->min_avail = $this->rbound;
             $this->history_fwd = [];
             $this->history_bwd = [];
+            if ($clean_cache) 
+                foreach ($this->cache_files as $file_name)
+                    unlink($file_name);
+            $this->cache_files = [];
         }
 
         public function SaldoVolume(): float {

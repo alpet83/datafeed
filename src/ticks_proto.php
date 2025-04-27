@@ -19,12 +19,12 @@
          * @var array
          */
         public     array $candle_map = [];  
-        public     array $filled_vol = [];
+        public     array $unfilled_vol = [];
 
         public function __toString() {
             $res = parent::__toString();
             $res .= ', CM: '.count($this->candle_map);
-            $res .= ', UF: '.count($this->filled_vol); 
+            $res .= ', UF: '.count($this->unfilled_vol); 
             return $res;
         }
 
@@ -51,24 +51,30 @@
         }
 
         protected function CheckFillMinute(int $m, float $amount) {        
-            if (!isset($this->filled_vol[$m]))
+            if (!isset($this->unfilled_vol[$m]))
                 return;
 
             $cm = $this->candle_map;
             if (!isset($cm[$m])) 
                 log_cmsg("~C91#WARN:~C00 CheckFillMinute no candle record for minute %d", $m);                           
 
-            $this->filled_vol[$m] = ($this->filled_vol[$m] ?? 0) - $amount;                         
-            if ($this->filled_vol[$m] <= 0) 
-                unset($this->filled_vol[$m]);
+            $this->unfilled_vol[$m] = ($this->unfilled_vol[$m] ?? 0) - $amount;                         
+            if ($this->unfilled_vol[$m] <= 0) 
+                unset($this->unfilled_vol[$m]);
         }
         public function Count(): int {
             return count($this->cache_map);
         }
 
         public function IsFullFilled(): bool {            
-            if (0 == count($this->filled_vol) && count($this->candle_map) > 0) return true;
+            if (0 == count($this->unfilled_vol) && count($this->candle_map) > 0) return true;
             return parent::IsFullFilled();
+        }
+
+        public function LeftToDownload(): float {
+            if (count ($this->unfilled_vol) > 0)
+                return array_sum($this->unfilled_vol);
+            return parent::LeftToDownload();
         }
 
         /** загрузка минутных свечей для контроля консистентности */
@@ -86,6 +92,8 @@
             $start = format_ts( max($this->lbound, EXCHANGE_START_SEC));            
             $end = format_ts($this->rbound);                        
 
+            $inaccuracy = 0.999; // 0.1% погрешность по объему, чтобы не зацикливаться на заполнении минуток 
+
             $map = $mysqli_df->select_rows('ts,open,close,high,low,volume', $c_table, "WHERE ts >= '$start' AND ts <= '$end'", MYSQLI_NUM);
             foreach ($map as $candle) {
                 $t = strtotime(array_shift($candle));
@@ -95,7 +103,7 @@
                 }
                 $key = $this->candle_key($t);
                 $this->candle_map[$key] = $candle;
-                $this->filled_vol[$key] = $candle[CANDLE_VOLUME] * 0.995;  // 0.5% объема закладывается как погрешность, чтобы быстрее фиксировать заполнение минуты
+                $this->unfilled_vol[$key] = $candle[CANDLE_VOLUME] * $inaccuracy; 
             }
 
             $vol_map = $mysqli_df->select_map("(toHour(ts) * 60 + toMinute(ts)) as minute, SUM(amount) as volume", $table, 
@@ -103,19 +111,19 @@
             $abnormal = 0;
             $overhead = 0;
             foreach ($vol_map as $m => $v) {
-                if (!isset($this->filled_vol[$m])) continue;                                
-                $cm = $this->candle_map[$m] ?? [0, 0, 0, 0, $this->filled_vol[$m] / 0.995];
+                if (!isset($this->unfilled_vol[$m])) continue;                                
+                $cm = $this->candle_map[$m] ?? [0, 0, 0, 0, $this->unfilled_vol[$m] / $inaccuracy];
                 if ($v > $cm[CANDLE_VOLUME] * 1.005)  {
                     $abnormal ++;
                     $overhead += $v - $cm[CANDLE_VOLUME];
                 }
-                $this->filled_vol[$m] -= $v;    // для этой минуты тики загружены хотя-бы частично                
+                $this->unfilled_vol[$m] -= $v;    // для этой минуты тики загружены хотя-бы частично                
                 if (!$this->TestUnfilled($m)) 
-                    unset($this->filled_vol[$m]); // сокращение работы
+                    unset($this->unfilled_vol[$m]); // сокращение работы
             }
-            if (count($this->filled_vol) > 0) // hundreds means - candles possible wrong loaded
+            if (count($this->unfilled_vol) > 0) // hundreds means - candles possible wrong loaded
                 log_cmsg("~C96#PERF:~C00 need refill ticks for %d minutes in range %s .. %s ", 
-                            count($this->filled_vol), format_tms($this->UnfilledAfter()), format_tms($this->UnfilledBefore()));
+                            count($this->unfilled_vol), format_tms($this->UnfilledAfter()), format_tms($this->UnfilledBefore()));
             if ($abnormal > 0)
                 log_cmsg("~C91#WARN:~C00 %d abnormal minutes, where volume of ticks > volume of candle, and total overhead %s. May be excess/wrong data in DB ",    
                                  $abnormal, format_qty($overhead)); // TODO: patch candles table with reset volume? 
@@ -194,11 +202,11 @@
         protected function TestUnfilled($m) {
             // $cm = $this->candle_map[$m] ?? [0, 0, 0, 0, 0];
             // $mv = $cm[CANDLE_VOLUME];
-            return $this->filled_vol[$m]  > 0; 
+            return $this->unfilled_vol[$m]  > 0; 
         } 
 
         public function UnfilledAfter(): int {
-            foreach ($this->filled_vol as $key => $v)
+            foreach ($this->unfilled_vol as $key => $v)
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key);
                     if ($this->LoadedForward ($tms, 10000)) continue; // предотвращение повторных результатов
@@ -210,7 +218,7 @@
         }
 
         public function UnfilledBefore(): int {         
-            $rv = array_reverse($this->filled_vol, true); // need maximal key
+            $rv = array_reverse($this->unfilled_vol, true); // need maximal key
             foreach ($rv as $key => $v) {                
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key + 1); // download need from next minute
@@ -551,7 +559,7 @@ RESTART:
             protected function OnBeginDownload(DataBlock $block) {                
                 $max = 0;
                 $min = 1440;
-                foreach ($block->filled_vol as $m => $v) {
+                foreach ($block->unfilled_vol as $m => $v) {
                     $cr = $block->candle_map[$m] ?? [0, 0, 0, 0, 0];
                     $mv = $cr[CANDLE_VOLUME] ?? 0;
                     if ($v > $mv * 0.05) {
@@ -562,7 +570,7 @@ RESTART:
                 log_cmsg(" ~C94#BLOCK_INFO:~C00 filled_vol min %d / max %d ", $min, $max);
                 $uf = ( $block->UnfilledBefore() - $block->lbound_ms ) / 1000;
                 if ($max > 120 && $uf < 3600) {
-                    $vals = array_values($block->filled_vol);
+                    $vals = array_values($block->unfilled_vol);
                     $vals = array_reverse($vals);                    
                     $vals = array_slice($vals, 0, 10);
                     log_cmsg(" ~C91#WARN:~C00 UnfilledBefore returned too small gap %.3f, reversed volume vector (10): %s ", $uf, json_encode($vals));                    
@@ -616,31 +624,33 @@ RESTART:
                 // для тиков целевой объем должен быть меньше или равен набранному, плюс минус погрешность-толерантность                             
                 $diff = $block->target_volume - $check_volume;                 
                 $diff_pp = 100 * $diff / max($block->target_volume, $check_volume, 0.01);
+                $whole_load = false;
                 if ($diff_pp < $this->volume_tolerance) {
+                    $whole_load = true;
                     log_cmsg("$prefix($symbol/$index):~C00 %s, lag left %d, %s, target_volume reached %s in %d ticks filled in session: %s ", 
                                 strval($block), $lag_left, $block->info, format_qty($check_volume), $count, $filled);    
-                } else {
+                } elseif ($block instanceof TicksCache) {
                     log_cmsg("~C04{$prefix}_WARN($symbol/$index):~C00 %s, lag left %d, %s, target_volume reached %s instead %s (diff %.1f%%), $s_info filled in session: %s ", 
                                 strval($block), $lag_left, $block->info, format_qty($check_volume), format_qty($block->target_volume), $diff_pp, $filled);    
                     $fk = [];
                     $uk = [];
-                    $vk = [];
-                    foreach ($block->filled_vol as $mk => $v) {
+                    $vk = [];                    
+                    foreach ($block->unfilled_vol as $mk => $v) {
                         if ($v > 0) 
                             $uk [$mk]= $v;
                         else    
-                            $fk [$mk]= $v;
-                    }
+                            $fk [$mk]= $v;  
+                    }                    
 
-                    if (count($uk) > 10) {
+                    if (count($uk) > 0) {
                         foreach ($block->candle_map as $mk => $cr)
                             $vk [$mk]= $cr[CANDLE_VOLUME];                                         
-                        log_cmsg(" ~C94#FILLED_DUMP: ~C00 F: %s \n U: %s \n CM: %s", json_encode($fk), json_encode($uk), json_encode($vk));                                
-                        if ($diff_pp > 5)
-                            error_exit("~C101~C97       STOPe               ~C00");
+                        $saldo_uf = array_sum($uk);
+                        log_cmsg(" ~C94#FILLED_DUMP: ~C00 F: %s \n U: %s = %s \n CM: %s",
+                                     json_encode($fk), format_qty($saldo_uf), json_encode($uk), json_encode($vk));                                
                     }
                 }
-                $block->Reset(); // clean memory
+                $block->Reset($whole_load); // clean memory
             }
 
             protected function OnCacheUpdate(DataBlock $default, DataBlock $cache) {         
