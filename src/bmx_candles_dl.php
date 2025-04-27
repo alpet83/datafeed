@@ -542,7 +542,7 @@
    
     $hour = date('H');
     $hstart = floor(time() / 3600) * 3600;     
-    $pid_file = sprintf($tmp_dir.'/candle_dl@%s.pid', $symbol);
+    $pid_file = sprintf($tmp_dir.'/candles_dl@%s.pid', $symbol);
     log_cmsg("~C97#INIT:~C00 trying lock PID file %s...", $pid_file);
     try {
         $pid_fd = setup_pid_file($pid_file, 300);       
@@ -555,7 +555,7 @@
     if (date('H') != $hour) 
         error_exit("~C91#FATAL:~C00 pid lock wait timeouted, hour $hour ended");  
     
-    $log_base = 'logs/bmx_candle_dl';
+    $log_base = 'logs/bmx_candles_dl';
     $log_name = sprintf('%s@%s-%d.log', $log_base, $symbol, $hour); // 24 logs rotation    
     chdir(__DIR__);
     $log_file = fopen(__DIR__."/$log_name", 'w');

@@ -30,7 +30,7 @@
     $verbose = 3;
     $rest_allowed_t = time() + 40;
 
-    file_put_contents($tmp_dir.'/candle_dl.ts', date(SQL_TIMESTAMP));     
+    file_put_contents("$tmp_dir/ticks_dl.ts", date(SQL_TIMESTAMP));     
     error_reporting(E_ERROR | E_WARNING | E_PARSE);    
     mysqli_report(MYSQLI_REPORT_ERROR);  
     

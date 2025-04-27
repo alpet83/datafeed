@@ -317,10 +317,10 @@
     else
       $symbol = rqs_param("symbol", 'all');         
 
-    $pid_file = sprintf($tmp_dir.'/candle_dl@%s.pid', $symbol);
+    $pid_file = sprintf($tmp_dir.'/candles_dl@%s.pid', $symbol);
     $pid_fd = setup_pid_file($pid_file, 300);        
     $hour = date('H');
-    $log_name = sprintf('/logs/bfx_candle_dl@%s-%d.log', $symbol, $hour); // 24 logs rotation
+    $log_name = sprintf('/logs/bfx_candles_dl@%s-%d.log', $symbol, $hour); // 24 logs rotation
     $log_file = fopen(__DIR__.$log_name, 'w');
     flock($log_file, LOCK_EX);
     echo ".\n";
