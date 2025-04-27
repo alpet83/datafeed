@@ -51,13 +51,15 @@
         }
 
         protected function CheckFillMinute(int $m, float $amount) {        
+            if (!isset($this->filled_vol[$m]))
+                return;
+
             $cm = $this->candle_map;
             if (!isset($cm[$m])) 
                 log_cmsg("~C91#WARN:~C00 CheckFillMinute no candle record for minute %d", $m);                           
 
             $this->filled_vol[$m] = ($this->filled_vol[$m] ?? 0) - $amount;                         
-
-            if (0 == $this->filled_vol[$m]) 
+            if ($this->filled_vol[$m] <= 0) 
                 unset($this->filled_vol[$m]);
         }
         public function Count(): int {
@@ -78,8 +80,8 @@
             $c_table = str_replace('ticks', 'candles', $table);
             if (!$mysqli_df->table_exists($c_table)) return;                                                
 
-            $this->last_fwd = $this->lbound_ms - 1;
-            $this->last_bwd = $this->rbound_ms + 1;
+            $this->history_bwd = [];
+            $this->history_fwd = [];
 
             $start = format_ts( max($this->lbound, EXCHANGE_START_SEC));            
             $end = format_ts($this->rbound);                        
@@ -99,10 +101,14 @@
             $vol_map = $mysqli_df->select_map("(toHour(ts) * 60 + toMinute(ts)) as minute, SUM(amount) as volume", $table, 
                                                "WHERE date(ts) = '{$this->key}' GROUP BY minute ORDER BY minute");
             $abnormal = 0;
+            $overhead = 0;
             foreach ($vol_map as $m => $v) {
                 if (!isset($this->filled_vol[$m])) continue;                                
-                if ($v > $this->filled_vol[$m] * 1.05) 
+                $cm = $this->candle_map[$m] ?? [0, 0, 0, 0, $this->filled_vol[$m] / 0.995];
+                if ($v > $cm[CANDLE_VOLUME] * 1.005)  {
                     $abnormal ++;
+                    $overhead += $v - $cm[CANDLE_VOLUME];
+                }
                 $this->filled_vol[$m] -= $v;    // для этой минуты тики загружены хотя-бы частично                
                 if (!$this->TestUnfilled($m)) 
                     unset($this->filled_vol[$m]); // сокращение работы
@@ -111,7 +117,8 @@
                 log_cmsg("~C96#PERF:~C00 need refill ticks for %d minutes in range %s .. %s ", 
                             count($this->filled_vol), format_tms($this->UnfilledAfter()), format_tms($this->UnfilledBefore()));
             if ($abnormal > 0)
-                log_cmsg("~C91#WARN:~C00 %d abnormal minutes, where volume of ticks > volume of candle ", $abnormal); // TODO: patch candles table with reset volume? 
+                log_cmsg("~C91#WARN:~C00 %d abnormal minutes, where volume of ticks > volume of candle, and total overhead %s. May be excess/wrong data in DB ",    
+                                 $abnormal, format_qty($overhead)); // TODO: patch candles table with reset volume? 
         }
 
 
@@ -194,7 +201,7 @@
             foreach ($this->filled_vol as $key => $v)
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key);
-                    if ($tms <= $this->last_fwd) continue; // предотвращение повторных результатов
+                    if ($this->LoadedForward ($tms, 10000)) continue; // предотвращение повторных результатов
                     if ($tms >= $this->lbound_ms) return $tms;
                     log_cmsg("~C91#ERROR(UnfilledAfter):~C00 for minute key %d produced timestamp %s ", $key, format_tms($tms));
                     break;
@@ -207,7 +214,7 @@
             foreach ($rv as $key => $v) {                
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key + 1); // download need from next minute
-                    if ($tms >= $this->last_bwd) continue; // предотвращение повторных результатов
+                    if ($this->LoadedForward($tms, 10000)) continue; // предотвращение повторных результатов
                     return $tms;
                 }
             }
@@ -273,7 +280,7 @@
                 if (str_in($code, 'ReplacingMergeTree(ts)'))
                     log_cmsg("~C92#TABLE_OK:~C00 Used actual Engine ");
                 else  {
-                    log_cmsg("~C31#WARN_UPGRADE:~C00 changing engine for table %s", $table_name);
+                    log_cmsg("~C31#WARN_UPGRADE:~C00 changing engine for table %s from %s", $table_name, $this->table_engine);
                     $query = "REPLACE TABLE  $table_name ENGINE  ReplacingMergeTree(ts) ORDER BY trade_no PARTITION BY toStartOfMonth(ts)  AS SELECT * FROM $table_name";
                     $mysqli_df->try_query($query);
                 }                
@@ -326,6 +333,10 @@
                     log_cmsg("~C31#WARN_INIT_BLOCKS:~C00 start timestamp %d: %s, will be increased", $start, gmdate(SQL_TIMESTAMP, $start));
                     $start = strtotime(HISTORY_MIN_TS); 
                 }
+
+                /*  Сканирование проблем в таблице с тиками дело достаточно долгое, поэтому каждый запуск скрипта оно не обязательно. 
+                   Все потенциально неправильные дни будут добавлены в расписание, из которого при каждом запуске выбирается столько, сколько успеется. 
+                */
                 $schedule = $mysqli->select_map('date, target_volume', 'download_schedule', 
                                                 "WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (target_volume > 0) ORDER BY date DESC");
                 if (0 == count($schedule))
@@ -587,8 +598,11 @@ RESTART:
                                     "FINAL WHERE DATE(ts) = '$day' GROUP BY DATE(ts)", MYSQLI_OBJECT);
 
                 $check_volume = is_object($check) ? $check->volume : $saldo_volume;                
-                if ($saldo_volume > $check_volume * 0.75)
+                $s_info = 'postponed for retry, ';
+                if ($check_volume > $block->target_volume * 0.75)  {
                     sqli()->try_query("DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (date = '$day')");                
+                    $s_info = '';
+                }
                 
                 $count = is_object($check) ? $check->count : count($block);                
                 $db_diff = $saldo_volume - $check->volume;                 
@@ -599,13 +613,14 @@ RESTART:
                              $check->date, $check->count, count($block),
                              format_qty($check->volume), format_qty($saldo_volume), $db_diff_pp);                
 
-                $diff = abs($block->target_volume - $check_volume);                 
+                // для тиков целевой объем должен быть меньше или равен набранному, плюс минус погрешность-толерантность                             
+                $diff = $block->target_volume - $check_volume;                 
                 $diff_pp = 100 * $diff / max($block->target_volume, $check_volume, 0.01);
                 if ($diff_pp < $this->volume_tolerance) {
                     log_cmsg("$prefix($symbol/$index):~C00 %s, lag left %d, %s, target_volume reached %s in %d ticks filled in session: %s ", 
                                 strval($block), $lag_left, $block->info, format_qty($check_volume), $count, $filled);    
                 } else {
-                    log_cmsg("~C04{$prefix}_WARN($symbol/$index):~C00 %s, lag left %d, %s, target_volume reached %s instead %s (diff %.1f%%), filled in session: %s ", 
+                    log_cmsg("~C04{$prefix}_WARN($symbol/$index):~C00 %s, lag left %d, %s, target_volume reached %s instead %s (diff %.1f%%), $s_info filled in session: %s ", 
                                 strval($block), $lag_left, $block->info, format_qty($check_volume), format_qty($block->target_volume), $diff_pp, $filled);    
                     $fk = [];
                     $uk = [];
@@ -616,11 +631,14 @@ RESTART:
                         else    
                             $fk [$mk]= $v;
                     }
-                    foreach ($block->candle_map as $mk => $cr)
-                        $vk [$mk]= $cr[CANDLE_VOLUME];                     
-                    log_cmsg(" ~C94#FILLED_DUMP: ~C00 F: %s \n U: %s \n CM: %s", json_encode($fk), json_encode($uk), json_encode($vk));                                
-                    if ($diff_pp > 5)
-                        error_exit("~C101~C97       STOPe               ~C00");
+
+                    if (count($uk) > 10) {
+                        foreach ($block->candle_map as $mk => $cr)
+                            $vk [$mk]= $cr[CANDLE_VOLUME];                                         
+                        log_cmsg(" ~C94#FILLED_DUMP: ~C00 F: %s \n U: %s \n CM: %s", json_encode($fk), json_encode($uk), json_encode($vk));                                
+                        if ($diff_pp > 5)
+                            error_exit("~C101~C97       STOPe               ~C00");
+                    }
                 }
                 $block->Reset(); // clean memory
             }
@@ -691,13 +709,13 @@ RESTART:
                 if ($mysqli_df->try_query($query)) {
                     if ($dummies > 0)
                         log_cmsg("~C94#INFO({$this->symbol}):~C00 %d dummies from %d rows inserted into %s, affected %d", 
-                                    $dummies, count($cache), $this->table_name, $mysqli_df->affected_rows);
-                    
+                                    $dummies, count($cache), $this->table_name, $mysqli_df->affected_rows);                    
                     $res = $mysqli_df->affected_rows;
                     $oldest = $cache->oldest_ms();
-                    $this->db_oldest = min($this->db_oldest, $oldest);
-                    $newest = $cache->oldest_ms();
-                    $this->db_newest = min($this->db_newest, $newest);
+                    if ($oldest > EXCHANGE_START)
+                        $this->db_oldest = min($this->db_oldest, $oldest);
+                    $newest = $cache->newest_ms();
+                    $this->db_newest = max($this->db_newest, $newest);
                     if ($res >= 5000)
                         log_cmsg("~C96 #DB_PERF:~C00 %d ticks saved in %.3f seconds, db_range now [%s..%s]",
                                          $res, pr_time() - $q_start,

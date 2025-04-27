@@ -19,6 +19,7 @@
         protected   int $days_per_block = 5;
         protected   int $blocks_at_once = 10;
         protected   int $timeout_at_once = 5; 
+        public      $current_interval = 10; // используется при обработке импорта и округлении шага загрузки
 
         public     int $db_oldest = 0; // saved in session, not global
         public     int $db_newest = 0; // saved in session, not global
@@ -53,6 +54,7 @@
 
         protected   $table_create_code = ''; // for MySQL loaded by CorrectTable 
         protected   $table_create_code_ch = ''; // for ClickHouse loaded by CorrectTable
+        protected   $table_engine = '';
         protected   $table_need_recovery = false;
 
         protected   $total_requests = 0;
@@ -78,7 +80,7 @@
 
 
         public function __construct(DownloadManager $mngr, \stdClass $ti) {
-            $this->oldest_ms = time_ms();
+            $this->oldest_ms = $this->db_oldest = time_ms();
             parent::__construct($mngr, $ti);
             if (!$this->data_name)
                 throw ErrorException("~C91ERROR:~C00 data_name not set for {$this->symbol} before calling constructor");
@@ -241,9 +243,7 @@ SKIP_DOWNLOAD:
             $table_code = null;
 
             if ($mysqli->table_exists($table_name)) {
-                $this->table_create_code = $table_code = $mysqli->show_create_table($table_name);                         
-                if ($this->table_create_code) 
-                    $this->partitioned = str_in($this->table_create_code, 'PARTITION BY');
+                $this->table_create_code = $table_code = $mysqli->show_create_table($table_name);                
             }
             elseif (str_in($this->table_proto, 'mysql') )
                 log_cmsg("~C31#WARN(func):~C00 on %s table %s not created yet from %s", $mysqli->server_info, $table_name, $this->table_proto);
@@ -251,12 +251,16 @@ SKIP_DOWNLOAD:
             if ($mysqli_df->table_exists($table_name)) {
                 $prop = $mysqli_df->is_clickhouse() ? 'table_create_code_ch' : 'table_create_code';
                 $this->$prop = $table_code =  $mysqli_df->show_create_table($table_name);
+                log_cmsg("~C92#TABLE_CODE:~C00 loaded for %s on %s, saved as %s.", $table_name, $mysqli_df->server_info, $prop);
             }
             elseif (!$chdb) {
                 log_cmsg("~C31#WARN($func):~C00 on %s table %s not created yet, due last conn - can't continue", $mysqli_df->server_info, $table_name);
                 return;
             }                             
-            
+            if ($table_code) 
+                $this->partitioned = str_in($table_code, 'PARTITION BY');    
+
+
             if (is_object($chdb))
             try {                
                 $chdb->database(DB_NAME);
@@ -288,6 +292,9 @@ SKIP_DOWNLOAD:
                 log_cmsg("~C91 #ERROR($func):~C00 failed retrieve table creating code for %s, error: %s", $table_name, $db_error);
                 return;
             }           
+            preg_match('/ENGINE = (\S+)/', $table_code, $match);
+            $this->table_engine = $match[1] ?? '??';
+            log_cmsg("~C93#TABLE_ENGINE:~C00 table `%s` engine is [%s]", $table_name, $this->table_engine);
 
             // здесь процесс пойдет, если mysqli_df - подключен к ClickHouse вместо chdb    
             if ($mysqli_df->is_clickhouse()) {
@@ -452,8 +459,6 @@ SKIP_CHECKS:
 
 
             $added = 0;                
-
-            $this->loops = 0;              
             $t_now = time();
             $fresh_rqs = [];
             foreach ($this->last_requests as $rqt => $rqs)
@@ -494,8 +499,8 @@ SKIP_CHECKS:
                 while ($before_ms > $lbound_ms || $lag_right > 300) {
                     //  =============================================================================================       
                     $now = time();
-                    if ($this->loops >= 1500) {
-                        $this->last_error = "loop count reach {$this->loops}, probably infinite loop";
+                    if ($block->loops >= 1500) {
+                        $this->last_error = "loop count reach {$block->loops}, probably infinite loop";
                         break;
                     }
 
@@ -503,9 +508,9 @@ SKIP_CHECKS:
                     $cycle_elps = $now - $mgr->cycle_start;
                     /*
                     if ($elps > $this->cycle_time * 0.75
-                        || $this->loops > 100 
+                        || $block->loops > 100 
                         || $cycle_elps >= $this->cycle_time) {
-                        $this->last_error = sprintf('timeouted elps = %d, cycle_elps %d, loops = %d, ', $elps, $cycle_elps, $this->loops);
+                        $this->last_error = sprintf('timeouted elps = %d, cycle_elps %d, loops = %d, ', $elps, $cycle_elps, $block->loops);
                         break; // не занимать все время общего цикла
                     } //*/
 
@@ -527,7 +532,7 @@ SKIP_CHECKS:
                     // && ($cache->Covers($block->min_avail) || $cache->Covers($block->max_avail))
                     if (count($cache) > 0 ) {   
                         // если очень много данных в каждой минутке, округление шага надо снижать. Вопрос в критерии                     
-                        $round_step = $last_density >= $this->default_limit ? 1000 : $round_max;                       
+                        $round_step = $last_density >= $this->default_limit ? 1000 * $this->current_interval : $round_max;                       
                         $oldest_ms = ceil($cache->oldest_ms() / $round_step ) * $round_step;
                         $newest_ms = floor($cache->newest_ms() / $round_step ) * $round_step;                               
 
@@ -556,35 +561,39 @@ SKIP_CHECKS:
                                         format_ts($block->lbound), format_ts($block->rbound));
                         // from hour start if initial
                         $tail = $block->max_avail > $block->lbound ? $block->max_avail : time() - 180;                                        
-                        $tail = max($tail, $hstart);      
-                        if ($block->max_avail <= $hstart && $block->newest_ms() != $block->last_fwd) {  // means no records in this hour, or initial download                             
+                        $tail = max($tail, $hstart);       
+                        if ($block->max_avail <= $hstart && !$block->LoadedForward($after_ms)) {  // means no records in this hour, or initial download                             
                             $reverse = false;         
                             $from_ts = date_ms('Y-m-d H:00:00', $after_ms);                             
                             $after_ms = $this->TimeStampDecode($from_ts, 3); 
-                            log_cmsg("~C04~C93#TAIL_DOWNLOAD({$this->loops}):~C00 right block side after %s, next attempt planned at %s", color_ts($from_ts), color_ts($block->next_retry));
+                            log_cmsg("~C04~C93#TAIL_DOWNLOAD({$block->loops}):~C00 right block side after %s, next attempt planned at %s", color_ts($from_ts), color_ts($block->next_retry));
                         }
-                        elseif ($this->loops <= 0 && $before_ms != $block->last_bwd) {  
+                        elseif ($block->loops <= 0 && !$block->LoadedBackward($before_ms, 30000)) {  
                             $before_ms = time_ms();                            
-                            log_cmsg("~C04~C93#TAIL_DOWNLOAD({$this->loops}):~C00 right block side before now");
+                            log_cmsg("~C04~C93#TAIL_DOWNLOAD({$block->loops}):~C00 right block side before now");
                         }                        
                     }                                         
                     elseif ( $block->Covers_ms($before_ms) && $block->attempts_bwd < 3) {  // $block->max_avail - $block->lbound > 300 &&
                         // самый базовый сценарий загрузки исторических блоков, заполнение справа налево - сначала свежие данные                      
-                        if ($before_ms == $block->last_bwd ) {
+                        if ($block->LoadedBackward($before_ms)) {
                             $block->attempts_bwd ++;                        
                             $txt = 'RELOAD';
                         }
+                        else
+                            $block->attempts_bwd = 0;
                         $info = $block->min_avail > $block->lbound ? sprintf('filled %d up to %s ', $block->fills, color_ts($block->min_avail)) : 'empty';                    
                         log_cmsg(" ~C34#BLOCK_HEAD_$txt:~C00 block %s $info, requesting left completion before %s, target volume %s", 
                                     $block_id, color_ts($before_ms / 1000), format_qty($block->target_volume));
                     }
                     elseif ( $block->Covers_ms($after_ms) && $block->attempts_fwd < 3 && count($block) > 0) { // $block->rbound - $block->max_avail > 300 &&
                         // обычно кусочек справа может быть не загружен лишь формально, т.к. сделок в последние часы не было. Но для уверенности в кэше должны появиться записи с большей чем правая граница блока. 
-                        // выполнение этого кода очень желательно, после того как будет загружена голова блока (стартовые данные)                         
-                        if ($after_ms == $block->last_fwd ) {
+                        // выполнение этого кода очень желательно, после того как будет загружена голова блока (стартовые данные), дабы заполнение шло влево
+                        if ($block->LoadedForward($after_ms)) {
                             $block->attempts_fwd ++;
                             $txt = 'RELOAD';
                         }                        
+                        else
+                            $block->attempts_fwd = 0;
                         log_cmsg(" ~C36#BLOCK_TAIL_$txt:~C00 block %s filled %d before %s, requesting right completion, target volume %s",  
                                         $block_id, $block->filled, format_tms($after_ms), format_qty($block->target_volume));                        
                         $reverse = false;                        
@@ -599,13 +608,8 @@ SKIP_CHECKS:
 
                         $block->attempts_bwd ++;
                         $block->attempts_fwd ++;
-                        if ( $block->last_bwd > 0 && $block->last_fwd > 0 ) // для этого блока проводилось выделенное сканирование, его не накрыло большим кэшем
-                            log_cmsg("\t~C33#BLOCK_SKIP:~C00 no additional records received, was tested before %s after %s, covered %d / %d records ",
-                                        format_tms($block->last_bwd), format_tms($block->last_fwd), $stored, $avail);
-                        else 
-                            log_cmsg("\t~C33#BLOCK_SKIP:~C00 source timepoints %s .. %s outbound block %s, covered %d / %d records; no download will help",
-                                        strval($block), format_tms($before_ms), format_tms($after_ms), $stored, $avail);
-                                                    
+                        log_cmsg("\t~C33#BLOCK_SKIP:~C00 source timepoints %s .. %s outbound block %s, covered %d / %d records; no download will help",
+                                    strval($block), format_tms($before_ms), format_tms($after_ms), $stored, $avail);                                                    
                                     
                         goto PROCESS_DATA;
                     }
@@ -621,9 +625,9 @@ SKIP_CHECKS:
                     verify_timestamp_ms($t_from, 't_from before load block '.strval($block));                    
 
                     if ($reverse)
-                        $block->last_bwd = $t_from;
+                        $block->LoadedBackward($t_from, 0, true);
                     else
-                        $block->last_fwd = $t_from;                    
+                        $block->LoadedForward($t_from, 0, true);                    
 
                     if (!$reverse && $t_from < $block->lbound_ms)
                         throw new Exception("OUTBOUND: selected time before block starts for forward load " . strval($block).': '.format_tms($t_from));
@@ -756,9 +760,10 @@ SKIP_CHECKS:
 
                         $cache_info = 'invalid/void';
                         if ($cache_oldest <= $cache_newest)
-                            $cache_info = format_color("%s..%s", color_ts($cache_oldest / 1000), color_ts($cache_newest / 1000));
+                            $cache_info = format_color("%s..%s = %.1f min", color_ts($cache_oldest / 1000), color_ts($cache_newest / 1000), 
+                                                                          ($cache_newest - $cache_oldest) / 60000);
 
-                        log_cmsg("~C96\t\t#BLOCK_SUMMARY({$this->loops})~C00: %d $data_name downloaded (%d saldo, %d in cache) with density %.1f / minute, range [$cache_info], block stored range [%s..%s]", 
+                        log_cmsg("~C96\t\t#BLOCK_SUMMARY({$block->loops})~C00: %5d $data_name downloaded (%7d saldo, %7d in cache) with density %4.1f / minute, accumulated range [$cache_info], block stored range [%s..%s]", 
                                     count($data), $added, $cache_size, $last_density,
                                     color_ts( $block->min_avail),                                
                                     color_ts( $block->max_avail));
@@ -774,7 +779,7 @@ SKIP_CHECKS:
                                         $block_id, count($data), $block->attempts_bwd + $block->attempts_fwd, $this->last_error);                    
                     }
 
-                    $this->loops ++;                                                         
+                    $block->loops ++;                                                         
                     
                     $mgr->ProcessWS(false); // обновления мимо кэша!
                     
@@ -944,7 +949,7 @@ SKIP_CHECKS:
             elseif ($blocks_count > 10)
                 log_cmsg("~C33#PREPARE_DL:~C00 already have %d blocks, scaning disabled", $blocks_count);
             
-            $n_blocks = count($this->blocks);
+            $n_blocks = $this->BlocksCount();
             if ($n_blocks > 0) { 
                 $start_tss = gmdate(SQL_TIMESTAMP, $start);
                 $end_tss = gmdate(SQL_TIMESTAMP, $end);
@@ -953,10 +958,10 @@ SKIP_CHECKS:
             else
                $this->head_loaded = true;
 
-            $this->nothing_to_download = 0 == $this->BlocksCount();
+            $this->nothing_to_download = 0 == $n_blocks;
 
             $last = $this->db_last(false, 3); // in seconds
-            if (0 == $this->newest_ms && !is_null($last)) 
+            if (0 == $this->newest_ms && $last !== null) 
                 $this->newest_ms = $last;
             $this->initialized = true;
         }
@@ -964,13 +969,13 @@ SKIP_CHECKS:
         public function RestDownload(): int {
             global $verbose, $rest_allowed_t;
             if ($this->rest_errors > 100)  return -1;                     
-            if (0 == ($this->data_flags & DL_FLAG_HISTORY)) return 0; // TODO: may allow download last block late
                           
+            $load_history = ($this->data_flags & DL_FLAG_HISTORY) > 0;
             $n_blocks = count($this->blocks);
             $mgr = $this->get_manager();
             $minute = date('i');            
             if (0 == $n_blocks) {                
-                if (0 == $this->loaded_blocks && $mgr->cycles < 30)
+                if (0 == $this->loaded_blocks && $mgr->cycles < 30 && $load_history)
                     log_cmsg("~C34#REST_DOWNLOAD:~C00 too small blocks to download for %s, head loaded = %s; scaning...", $this->ticker, $this->head_loaded ? 'yep' : '~C31nope');                    
                 $this->PrepareDownload();
                 $n_blocks = count($this->blocks);                             
@@ -1012,8 +1017,8 @@ SKIP_CHECKS:
                     $this->loaded_blocks = max ($this->loaded_blocks, 1);                                
             }   
 
-            if ($mgr->cycles < 2) return $total_loads;
 
+            if ($mgr->cycles < 2 || !$load_history) return $total_loads;
                     
             if ($n_blocks > 0) {
                 usort($this->blocks, 'compare_blocks'); // ascending by timestamp (lbound)
@@ -1070,7 +1075,7 @@ SKIP_CHECKS:
                 if (BLOCK_CODE::NOT_LOADED == $block->code || BLOCK_CODE::PARTIAL == $block->code) {
                     $res = $this->LoadBlock($index);
                     $key = $block->code->value;                             
-                    $total_loops += $this->loops;
+                    $total_loops += $block->loops;
                     $total_loads += $res;
                     
                     if ($res >= 500)                         

@@ -18,8 +18,8 @@
         public  int $attempts_bwd = 0;
         public  int $attempts_fwd = 0;
 
-        public  int $last_bwd = 0;
-        public  int $last_fwd = 0;
+        protected  array $history_bwd = [];
+        protected  array $history_fwd = [];
 
         public  int $duplicates = 0;
         public  int $fills = 0;
@@ -37,6 +37,7 @@
         public  $last_api_request = ''; // last API request
         public  $last_load = 0; // last load was (timestamp in seconds)
 
+        public  $loops = 0;     // сколько циклов загрузки было уже
 
         public  $avail_volume = 0; // объем в БД, для блоков подлежащих восстановлению
         public  $target_volume = 0; // целевой объем, для контроля 
@@ -269,6 +270,28 @@
         public function last() { return $this->cache_map[$this->lastKey()] ?? null;  }
         public function lastKey(): mixed {  return array_key_last($this->cache_map); }
 
+        public function LoadedBackward(int $tms, int $near = 60000, bool $add = false): bool {
+            if (isset($this->history_bwd[$tms])) return true;
+            if ($add) 
+                return $this->history_bwd[$tms] = true;
+
+            foreach ($this->history_bwd as $t => $v)
+                if (abs($t - $tms) < $near)                 
+                    return true;                
+            return $add;
+        }
+
+        public function LoadedForward(int $tms, int $near = 60000, bool $add = false): bool {
+            if (isset($this->history_fwd[$tms])) return true;
+            if ($add) 
+                return $this->history_fwd[$tms] = true;
+
+            foreach ($this->history_fwd as $t => $v)
+                if (abs($t - $tms) < $near)                 
+                    return true;                
+            return $add;
+        }
+
         public function newest_ms(): int {
             verify_timestamp($this->max_avail, 'from block->newest_ms');
             return $this->max_avail * 1000;
@@ -306,8 +329,8 @@
             $this->cache_map = [];
             $this->max_avail = $this->lbound;
             $this->min_avail = $this->rbound;
-            $this->last_fwd = $this->lbound_ms - 1;
-            $this->last_bwd = $this->rbound_ms + 1;
+            $this->history_fwd = [];
+            $this->history_bwd = [];
         }
 
         public function SaldoVolume(): float {

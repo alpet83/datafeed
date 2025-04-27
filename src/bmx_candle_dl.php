@@ -114,7 +114,7 @@
             $min_t = strtotime('2013-01-01 00:00');           
 
             $this->last_error = '';
-            $url = $this->rest_api_url.'/trade/bucketed';                        
+            $url = $this->rest_api_url.'trade/bucketed';                        
             $interval = '1m';                       
             $params = ['symbol' => $this->symbol, 'partial' => 'true', 'binSize' => $interval, 'reverse' => 'false', 'start' => 0, 'count' => 10];                                   
         
@@ -148,7 +148,7 @@
 
         /** function LoadCandles - request REST API for loading data before or after specified timestamp  */
         public function LoadCandles(DataBlock $block, string $ts_from, bool $backward_scan = true, int $limit = 1000): ?array {
-            $url = $this->rest_api_url.'/trade/bucketed';
+            $url = $this->rest_api_url.'trade/bucketed';
             $params = ['symbol' => $this->symbol, 'binSize' => '1m', 'count' => $limit];          
             $params ['columns'] = 'open,close,high,low,volume';
             $params ['reverse'] = $backward_scan ? 'true' : 'false';
@@ -176,7 +176,7 @@
             $stored = parent::LoadDailyCandles($per_once, $from_DB);            
             // if (is_array($res) && count($res) > 0) return $res;            
             
-            $url = $this->rest_api_url.'/trade/bucketed';
+            $url = $this->rest_api_url.'trade/bucketed';
             $per_once = min($per_once, 1500); 
 
             $params = ['symbol' => $this->symbol, 'binSize' => '1d', 'columns' => 'open,close,high,low,volume', 

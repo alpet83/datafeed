@@ -135,9 +135,7 @@
         public      $ws_loads = 0;
 
         /** цикл в котором последний раз осуществлялся импорт любых данных */
-        public      $last_cycle = 0; 
-
-        public      $loops = 0; // how many loops were performed for REST download
+        public      $last_cycle = 0;         
 
         protected   $ticker_info = null;
 
@@ -162,35 +160,42 @@
         public function CreateTables (): bool {
             global $chdb;                        
             $mysqli = sqli();
-            $mysqli_df = sqli_df();                
-            $search = '@TABLENAME';            
+            $mysqli_df = sqli_df();                            
             $mgr = $this->get_manager();
-            $exists = in_array($this->table_name, $mgr->db_tables_mysql);        
             $result = true;            
             if (str_in($this->table_proto, 'mysql'))                 
-                $result = $exists || $this->ProcessTemplate($mysqli, $this->table_proto, $search, $this->table_name);                      
+                $result = $this->CreateTable($mysqli, $this->table_proto, $this->table_name);                      
 
-            if ($mysqli != $mysqli_df && !$mysqli_df->is_clickhouse())  {            
-                $result &= $this->ProcessTemplate($mysqli_df, $this->table_proto, $search, $this->table_name);            
-            }            
+            if ($mysqli != $mysqli_df && !$mysqli_df->is_clickhouse())              
+                $result &= $this->CreateTable($mysqli_df, $this->table_proto, $this->table_name);            
+                        
             $ch_proto = str_replace('mysql', 'clickhouse', $this->table_proto);           
-            if ($mysqli_df->is_clickhouse()) {
-                $this->table_proto_ch = $ch_proto;
-                $exists = $mysqli_df->table_exists($this->table_name);                
-                $result &= $exists || $this->ProcessTemplate($mysqli_df, $ch_proto, $search, $this->table_name);
-            }
-            elseif ($chdb) {
-                $stmt = $chdb->select("SHOW TABLES LIKE '{$this->table_name}'");
-                $exists = false;
-                if ($stmt && !$stmt->isError())                     
-                    $exists = $stmt->count() > 0;                                                     
-                $result &= $exists || $this->ProcessTemplate($chdb, $ch_proto, $search, $this->table_name); 
-            }
+            $this->table_proto_ch = $ch_proto;
+            if ($mysqli_df->is_clickhouse()) 
+                $result &= $this->CreateTable($mysqli_df, $ch_proto, $this->table_name); 
+            elseif ($chdb)                 
+                $result &= $this->CreateTable($chdb, $ch_proto, $this->table_name);             
 
             $query = file_get_contents('download_schedule.sql'); // make scheduler table
             $mysqli->try_query($query);
             $mysqli_df->try_query("COMMIT;\n");                            
             return $result;
+        }
+
+        public function CreateTable(mixed $conn, string $file_name, string $table_name): bool {
+            $search = '@TABLENAME';           
+            if ($conn instanceof mysqli_ex) {
+                if ($conn->table_exists($table_name)) return true;
+                return $this->ProcessTemplate($conn, $file_name, $search, $table_name);
+            } 
+            elseif ($conn instanceof ClickHouseDB\Client) {
+                $stmt = $conn->select("SHOW TABLES LIKE '{$table_name}'");
+                if ($stmt && !$stmt->isError()) {
+                    if ($stmt->count() > 0) return true;
+                    return $this->ProcessTemplate($conn, $file_name, $search, $table_name);
+                }
+            }
+            return false;
         }
 
         public function IsHistorical() {

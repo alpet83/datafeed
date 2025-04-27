@@ -168,7 +168,6 @@
     abstract class CandleDownloader
         extends BlockDataDownloader {       
 
-        public      $current_interval = 60; // используется при обработке импорта
         
         public      $last_import = '';
 
@@ -180,7 +179,7 @@
 
         protected  $sync_map = []; // ClickHouse sync checked
 
-        
+        protected  $ch_count_map = []; // ClickHouse table stats 
 
         protected  $stats_table = '';
 
@@ -190,6 +189,7 @@
 
 
         public   function __construct(DownloadManager $mngr, stdClass $ti) {
+            $this->current_interval = 60;
             $this->import_method = 'ImportCandles';
             $this->load_method = 'LoadCandles';
             $this->block_class = 'CandlesCache';
@@ -242,6 +242,7 @@
         }    
 
         public function CreateTables(): bool {
+            global $chdb;
             $template = 'mysql_stats_table.sql';            
             $mysqli_df = sqli_df();
             if ($mysqli_df->table_exists($this->stats_table)) {
@@ -250,9 +251,32 @@
                     $mysqli_df->query("ALTER TABLE {$this->stats_table} CHANGE `volume_days` `volume_day` FLOAT NULL DEFAULT NULL");
             }
             else
-                $this->ProcessTemplate($mysqli_df, $template, '@TABLENAME', $this->stats_table); 
+                $this->CreateTable($mysqli_df, $template, $this->stats_table); 
 
-            return parent::CreateTables();
+            $res = parent::CreateTables();
+
+            $daily_table = "{$this->table_name}__1D";                
+            $exists = $mysqli_df->table_exists($daily_table);
+            $query = "CREATE TABLE IF NOT EXISTS $daily_table LIKE {$this->table_name}";
+            $res &= $mysqli_df->try_query($query); // void create                    
+
+            if (is_object($chdb)) {                 
+                // $this->table_proto_ch = str_replace('mysql', 'clickhouse', $this->table_proto);
+                $res &= $this->CreateTable($chdb, $this->table_proto_ch, $daily_table);
+            }
+            
+            if (!$exists) {                         
+                $code = $mysqli_df->show_create_table($this->table_name);
+                if (str_in($code, 'PARTITION BY'))
+                    $mysqli_df->query("ALTER TABLE {$this->table_name} REMOVE PARTITIONING");
+                $query = "ALTER TABLE $daily_table DROP IF EXISTS `flags`";
+                $mysqli_df->try_query($query); // not need flags column                       
+                try {
+                    if ($chdb) $chdb->write($query); 
+                } catch (Throwable $e) {
+                }
+            }
+            return $res;
         }
   
         public function FlushCache() {
@@ -419,27 +443,38 @@
         /**
          * загрузка всех дневных свечей подряд, из БД или API. Они будут использоваться для контроля объемов
         */
+
+        public function LoadClickHouseStats() {
+            global $chdb;
+            if (!is_object($chdb)) return;
+            $func = __FUNCTION__;
+            $table_name = $this->table_name;
+            $query = "SELECT DATE(ts) as date, COUNT(*) as count, SUM(volume) as volume FROM $table_name FINAL\n";
+            $query .= " GROUP BY DATE(ts)";
+            $stmt = $chdb->select($query);            
+            $result = [];
+            try {
+                if (is_object($stmt) && !$stmt->isError()) {
+                    $rows = $stmt->rows();
+                    file_put_contents("{$this->manager->tmp_dir}/{$this->ticker}-chdb-stats.json", json_encode($rows, JSON_PRETTY_PRINT));
+                    foreach ($rows as $row)  {
+                        if (!is_array($row) || !isset($row['date'])) break;
+                        $date = $row['date'];           
+                        $result[$date] = new mysqli_row($row);
+                    }
+                }
+            }
+            catch (Throwable $e) {
+                log_cmsg("~C31#ERROR($func):~C00 %s", $e->getMessage());
+            }            
+            return $result;
+        }
+
         public function LoadDailyCandles(int $per_once = 1000, bool $from_DB = true): ?array {
             global $mysqli_df, $chdb;
-            $prev_name = "{$this->table_name}_1D";
             $table_name = "{$this->table_name}__1D";
-
-            $rename = "RENAME TABLE IF EXISTS $prev_name TO $table_name";
-            if ($mysqli_df->table_exists($prev_name)) {                
-                if (!$mysqli_df->try_query($rename))
-                    $mysqli_df->try_query("DROP TABLE IF EXISTS $prev_name"); // can't rename, due exists with target name, so not need
-            }
-            if ($chdb)
-                $chdb->write($rename);
             
-            if ($from_DB) {                
-                if (!$mysqli_df->table_exists($table_name)) {
-                    $mysqli_df->try_query("CREATE TABLE IF NOT EXISTS $table_name LIKE {$this->table_name}"); // void create                    
-                    $mysqli_df->try_query("ALTER TABLE $table_name REMOVE PARTITIONING");
-                    $mysqli_df->try_query("ALTER TABLE $table_name DROP `flags`"); // not need flags column
-                    return null;
-                }
-                
+            if ($from_DB) {                                
                 log_cmsg("~C93#DAILY_CACHE:~C00 trying load from %s", $table_name);
                 $params = $mysqli_df->is_clickhouse() ? 'FINAL' : '';
                 $map = $mysqli_df->select_map('UNIX_TIMESTAMP(ts),open,close,high,low,volume', $table_name, $params, MYSQLI_NUM);
@@ -491,12 +526,13 @@
             check_mkdir($tmp_dir);
             $close_info = '';            
             $last_day = floor_to_day($block->rbound);            
-            $last = $block->last() ?? [];
+            $last = $block->last() ?? [0, 0, 0, 0, 0];
             if (isset($this->daily_map[$last_day])) {
                 $day = $this->daily_map[$last_day];
+                $last_close = $last[CANDLE_CLOSE] ?? 0;
                 $day_close = $day[CANDLE_CLOSE] ?? 0;
-                if ($day_close != $last[CANDLE_CLOSE]) 
-                    $close_info = format_color(", daily close %.5f != candle close %s:%.5f", $day_close, $ltk, $last[CANDLE_CLOSE]);
+                if ($day_close != $last_close) 
+                    $close_info = format_color(", daily close %.5f != candle close %s:%.5f", $day_close, $ltk, $last_close);
             }            
             else
                 log_cmsg("~C31#WARN:~C00 no info in daily_map [%s] for block %s", color_ts($last_day), strval($block));
@@ -729,6 +765,8 @@
             
             $stats = $mysqli_df->select_map('date, day_start, day_end, count_minutes as count, volume_minutes as volume, volume_day, repairs', $this->stats_table, '', MYSQLI_OBJECT);
 
+            $this->ch_count_map = $this->LoadClickHouseStats(); // same stats as count_map
+
             $dump = [];
             foreach ($count_map as $date => $row) 
                 $dump[$date] = strval($row);
@@ -949,29 +987,18 @@
             if (!is_object($chdb) || isset($this->sync_map[$day])) return 0;            
             $this->sync_map[$day] = 1;
             $table_name = $this->table_name;
-            $table_qfn = DB_NAME.".$table_name";
-            $query = "SELECT DATE(ts) as date, COUNT(*) as count, SUM(volume) as volume FROM $table_name FINAL\n";
-            $query .= "WHERE DATE(ts) = '$day' GROUP BY DATE(ts)";
-            $stmt = $chdb->select($query);
+            $table_qfn = DB_NAME.".$table_name";            
             $avail_volume = 0;
-            if (is_object($stmt) && !$stmt->isError()) {
-                $row = $stmt->fetchOne();
-                if (!is_array($row)) {
-                    log_cmsg("~C31#WARN:~C00 no data for %s in ClickHouse:$table_qfn: %s", $day, $stmt->dump());
-                    goto RESYNC;
-                }
-                $avail_volume = $row['volume'];
+            if (isset($this->ch_count_map[$day])) {
+                $rec = $this->ch_count_map[$day];
+                $avail_volume = $rec->volume;
                 $vdiff = $avail_volume - $target->volume;
                 $vdiff_pp = 100 * $vdiff / max($avail_volume, $target->volume, 0.1);
-                if ($row['count'] == $target->count && abs($vdiff_pp) < 0.01) {
-                    if ($vdiff_pp != 0)
-                        log_cmsg("~C92#SYNC_OK:~C00 for %s ClickHouse:$table_qfn, volume diff = %5.2f%% relative %s", 
-                                    $day, $vdiff_pp, format_qty($target->volume));
-                    return $row['volume'];
-                }
+                if ($rec->count == $target->count && abs($vdiff_pp) < 0.01) 
+                    return $rec->volume;                
                 else
                     log_cmsg("~C31#SYNC_NEED:~C00 for %s ClickHouse:$table_qfn, count %d vs MySQL %d  volume diff = %5.2f%% relative %s",
-                                    $day, $row['count'], $target->count, $vdiff_pp, format_qty($target->volume), );
+                                    $day, $rec->count, $target->count, $vdiff_pp, format_qty($target->volume), );
             }
 RESYNC:      
             $query = '-';
