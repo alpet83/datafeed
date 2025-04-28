@@ -278,9 +278,13 @@
             log_cmsg("~C91 #WS_WARN:~C00 WebSocket reconnect due %s, realtime loaders %d", $reason, count($loaders));
             $this->ws_reconnects ++;
             $this->ws_active = false;            
-            if (is_object($this->ws))
-                $this->ws->close();
-
+            try { 
+                if (is_object($this->ws))
+                    $this->ws->close();
+            } catch (Exception $E) {
+                $this->ws = null;
+            }
+            
             $this->CreateWebsocket();            
             $this->subs_map = [];
             $this->platform_status = -1; // means unknown

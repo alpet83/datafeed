@@ -54,13 +54,18 @@
             $row = array_map('trim', $row);
             // 0:timestamp, 1:symbol, 2:side, 3:size, 4:price, 5:tickDirection, 6:trdMatchID, 7:grossValue, 8:homeNotional, 9:foreignNotional, 10:trdType
             // 2024-07-26D00:11:34.470133966,100BONKUSDT,Buy,37000,0.0027734,PlusTick,00000000-006d-1000-0000-0009b24ca7de,102615800,37000,102.6158,Regular 
-            // needs: ts, symbol, price, amount, buy, trade_no
-            $tt = array_pop($row);
-            if ('Regular' != $tt) {
+            // needs: ts, symbol, price, amount, buy, trade_no            
+
+            $tt = false;
+            if (count($row) >= 11)
+                [$timestamp, $symbol, $side, $size, $price, $tick_dir, $match_id, $gross_v, $hn, $fn, $tt] = $row;
+            else
+                [$timestamp, $symbol, $side, $size, $price, $tick_dir, $match_id, $gross_v, $hn, $fn] = $row;
+            if (is_string($tt) && 'Settlement' == $tt || '' == $size) {
                 log_cmsg("~C94 #NOT_TICK:~C00 %s: %s ", $tt, implode(',', $row));
                 continue;
             }
-            [$timestamp, $symbol, $side, $size, $price, $tick_dir, $match_id, $gross_v, $hn, $fn] = $row;
+            
             $timestamp = substr($timestamp, 0, 23);
             $timestamp [10] = ' '; // replace D/T with space            
             $t = strtotime_ms($timestamp);
@@ -153,6 +158,6 @@
             else
                 log_cmsg("~C91#FAILED_SYNC:~C00 to table %s ", $table_name);
         }  catch (Exception $E) {
-            log_cmsg("~C91#EXCEPTION:~C00 %s", $E->getMessage());
+            log_cmsg("~C91#EXCEPTION(SYNC):~C00 Table %s, message: %s", $table_name, $E->getMessage());
         }
     } // foreach        

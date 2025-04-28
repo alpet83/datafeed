@@ -655,9 +655,8 @@ SKIP_CHECKS:
                         log_cmsg("\t~C31#WARN:~C00 breaking load block, due API temporary disabled");
                         break;     
                     }
+                                       
                     
-                    $lag_left = $block->min - $block->lbound;
-                    $lag_right = $block->rbound - $block->max_avail;
     PROCESS_DATA:                
 
                     $small_data = !is_array($data) || count($data) < $this->default_limit;
@@ -761,10 +760,15 @@ SKIP_CHECKS:
                             $block->info = "deadlock detected, loop count {$block->loops}";
                         }
 
-                        $lag_left = $block->VoidLeft();
-                        $lag_right = $block->VoidRight();
-                        if (count($block) > 0 && BLOCK_CODE::NOT_LOADED == $block->code) 
-                            $block->code = BLOCK_CODE::PARTIAL;       
+                                                
+                        $left_volume = $block->LeftToDownload();                         
+                        if (count($block) > 0 && $block->IsEmpty()) 
+                            $block->code = BLOCK_CODE::PARTIAL; //     
+
+                        if (0 == $left_volume && $block->code && $imp < $this->default_limit && !$block->IsFull()) {
+                            $block->code = BLOCK_CODE::FULL;
+                            $block->info = 'target volume reached';
+                        }
                                             
                         $this->newest_ms = max($this->newest_ms, $newest_ms); // last block update => upgrade latest available tick
 
@@ -772,7 +776,7 @@ SKIP_CHECKS:
                         if ($cache_oldest <= $cache_newest)
                             $cache_info = format_color("%s..%s = %.1f min", color_ts($cache_oldest / 1000), color_ts($cache_newest / 1000), 
                                                                           ($cache_newest - $cache_oldest) / 60000);
-                        $left_volume = $block->LeftToDownload();                                                                                
+                        
 
                         $pp = 100;
                         if ($block->target_volume > 0)

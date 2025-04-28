@@ -607,20 +607,22 @@ RESTART:
                                     "FINAL WHERE DATE(ts) = '$day' GROUP BY DATE(ts)", MYSQLI_OBJECT);
 
                 $check_volume = is_object($check) ? $check->volume : $saldo_volume;                
+                $check_date = is_object($check) ? $check->date : '<null>';
+                $count = is_object($check) ? $check->count : count($block);           
+
                 $s_info = 'postponed for retry, ';
                 if ($check_volume > $block->target_volume * 0.75)  {
                     sqli()->try_query("DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (date = '$day')");                
                     $s_info = '';
-                }
-                
-                $count = is_object($check) ? $check->count : count($block);                
-                $db_diff = $saldo_volume - $check->volume;                 
-
-                $db_diff_pp = 100 * $db_diff / max($check->volume, $saldo_volume, 0.01);
+                }               
+                     
+            
+                $db_diff = $saldo_volume - $check_volume;                 
+                $db_diff_pp = 100 * $db_diff / max($check_volume, $saldo_volume, 0.01);
                 if (is_object($check) && $db_diff_pp > 0.5) 
                     log_cmsg(" ~C31#WARN_DB_PROBLEM:~C00 %s, count in DB %d vs count in block %d, volume %s vs %s (diff %.1f%%)",
-                             $check->date, $check->count, count($block),
-                             format_qty($check->volume), format_qty($saldo_volume), $db_diff_pp);                
+                             $check_date, $count, count($block),
+                             format_qty($check_volume), format_qty($saldo_volume), $db_diff_pp);                
 
                 // для тиков целевой объем должен быть меньше или равен набранному, плюс минус погрешность-толерантность                             
                 $diff = $block->target_volume - $check_volume;                 
