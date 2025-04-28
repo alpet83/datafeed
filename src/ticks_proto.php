@@ -209,12 +209,13 @@
             foreach ($this->unfilled_vol as $key => $v)
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key);
-                    if ($this->LoadedForward ($tms, 10000)) continue; // предотвращение повторных результатов
+                    if ($this->LoadedForward ($tms, 5000)) continue; // предотвращение повторных результатов
                     if ($tms >= $this->lbound_ms) return $tms;
                     log_cmsg("~C91#ERROR(UnfilledAfter):~C00 for minute key %d produced timestamp %s ", $key, format_tms($tms));
                     break;
                 }
-            return parent::UnfilledAfter();
+
+            return $this->get_rbound_ms();
         }
 
         public function UnfilledBefore(): int {         
@@ -222,11 +223,11 @@
             foreach ($rv as $key => $v) {                
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key + 1); // download need from next minute
-                    if ($this->LoadedForward($tms, 10000)) continue; // предотвращение повторных результатов
+                    if ($this->LoadedBackward($tms, 5000)) continue; // предотвращение повторных результатов
                     return $tms;
                 }
             }
-            return parent::UnfilledBefore(); 
+            return $this->get_lbound_ms(); 
         }
         public function VoidLeft(string $unit = 's'): float {
             if (0 == count($this->candle_map)) return parent::VoidLeft();

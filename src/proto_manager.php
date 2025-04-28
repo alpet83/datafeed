@@ -541,6 +541,7 @@
                         $wait = true; // must read ping response
                     } catch (Throwable $E) {
                         log_cmsg("~C31 #EXCEPTION:~C00 while trying ping WebSocket: %s", $E->getMessage());
+                        $this->last_ping = $now;
                         $this->ws_stats ['exceptions'] = ($this->ws_stats ['exceptions'] ?? 1) + 1; 
                         if ($elps >= 60 || $this->ws_stats ['exceptions'] > 5)  {
                             $this->ReconnectWS('ping failed / connection lost');

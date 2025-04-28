@@ -276,7 +276,7 @@
             return $this->target_volume - $this->SaldoVolume();
         }
 
-        public function LoadedBackward(int $tms, int $near = 60000, bool $add = false): bool {
+        public function LoadedBackward(int $tms, int $near = 5000, bool $add = false): bool {
             if (isset($this->history_bwd[$tms])) return true;
             if ($add) 
                 return $this->history_bwd[$tms] = true;
@@ -287,7 +287,7 @@
             return $add;
         }
 
-        public function LoadedForward(int $tms, int $near = 60000, bool $add = false): bool {
+        public function LoadedForward(int $tms, int $near = 5000, bool $add = false): bool {
             if (isset($this->history_fwd[$tms])) return true;
             if ($add) 
                 return $this->history_fwd[$tms] = true;

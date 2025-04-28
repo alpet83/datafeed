@@ -495,6 +495,7 @@ SKIP_CHECKS:
             if ($index >= 0)
                 log_cmsg("~C93#BLOCK_DOWNLOAD_CYCLE($ticker):~C00  %s, before_ms %s ", strval($block), format_tms($before_ms));
             $cache = $this->cache;
+            $cache->key = 'main';
             $cache->OnUpdate();
             $this->OnBeginDownload($block);
             $round_max = 60000; 
@@ -515,8 +516,11 @@ SKIP_CHECKS:
                     }
                     
                     $reverse = true;
-                    $after_ms  = $block->UnfilledAfter();  // -  $round_start * $block->attempts_fwd
-                    $before_ms = $block->UnfilledBefore(); // + $round_start * $block->attempts_bwd
+                    $heavy_data = $last_density >= $this->default_limit;
+
+                    // если в предыдущую минуту было загружено данных с избытком, нужно небольшими шагами двигаться по истории внутри той-же минуты 
+                    $after_ms  = $heavy_data ? $after_ms + 10000 : $block->UnfilledAfter();  
+                    $before_ms = $heavy_data ? $before_ms - 10000 : $block->UnfilledBefore(); 
 
                     if ($before_ms < EXCHANGE_START) { // ещё миллион таких костылей добавлю, и заработает...
                         log_cmsg("~C91 #FINAL_BLOCK_DUMP:~C00 %s", json_encode($block, JSON_PRETTY_PRINT));
@@ -527,17 +531,21 @@ SKIP_CHECKS:
                     // && ($cache->Covers($block->min_avail) || $cache->Covers($block->max_avail))
                     if (count($cache) > 0 ) {   
                         // если очень много данных в каждой минутке, округление шага надо снижать. Вопрос в критерии                     
-                        $round_step = $last_density >= $this->default_limit ? 1000 * $this->current_interval : $round_max;                       
+                        $round_step = $heavy_data ? 10000 : $round_max;                       
                         $oldest_ms = $cache->oldest_ms();
-                        $newest_ms = $cache->newest_ms();                                                       
-                        $after_ms  = floor($after_ms / $round_step ) * $round_step;
-                        $before_ms = ceil($before_ms / $round_step ) * $round_step;                      
-                        // если в предыдущую минуту было загружено данных с избытком, нужно более прецизионно двигаться по истории
-                        // например, отталкиваться от времени крайней записи в кэше (слева и справа соответственно). 
-                        if ($last_density >= $this->default_limit)  {                                                
-                            $after_ms  = min($after_ms, $newest_ms);                                                                        
+                        $newest_ms = $cache->newest_ms();                        
+                        // вариант контролирующей оптимизации: отталкиваться от времени крайней записи в кэше (слева и справа соответственно). 
+                        if ($heavy_data)  {                           
+                            $pp = 100 * $last_density / $this->default_limit;
+                            log_cmsg("\t~C33~C04#HEAVY_DATA:~C00 last density overlap step capacity for %.1f%%, using shift inside minute. Input cursors: %s .. %s ",
+                                             $pp - 100, format_tms($before_ms), format_tms($after_ms)); 
+                            $after_ms  = min($after_ms , $newest_ms);                                                                        
                             $before_ms = max($oldest_ms, $before_ms);                         
+                        } else {
+                            $after_ms  = floor($after_ms / $round_step ) * $round_step;
+                            $before_ms = ceil($before_ms / $round_step ) * $round_step;                                    
                         }
+
                         if ($before_ms < EXCHANGE_START) {
                             log_cmsg(" ~C91#ERROR(LoadBlock):~C00  before_ms (%d) = oldest_ms (%d) | block->UnfilledBefore(%d) < EXCHANGE_START for block %s, from cache %s", 
                                         $before_ms,  $oldest_ms, $block->UnfilledBefore(),
@@ -764,13 +772,17 @@ SKIP_CHECKS:
                         if ($cache_oldest <= $cache_newest)
                             $cache_info = format_color("%s..%s = %.1f min", color_ts($cache_oldest / 1000), color_ts($cache_newest / 1000), 
                                                                           ($cache_newest - $cache_oldest) / 60000);
-                        $left_volume = $block->LeftToDownload();                                                                          
+                        $left_volume = $block->LeftToDownload();                                                                                
 
-                        log_cmsg("~C96\t\t#BLOCK_SUMMARY({$block->loops})~C00: %5d $data_name downloaded (%7d saldo, %7d in cache) with density %4.1f / minute, accumulated range [$cache_info], block stored range [%s..%s], left to download %s", 
+                        $pp = 100;
+                        if ($block->target_volume > 0)
+                            $pp = 100 - 100 * $left_volume / $block->target_volume;                        
+
+                        log_cmsg("~C96\t\t#BLOCK_SUMMARY({$block->loops})~C00: %5d $data_name downloaded (%7d saldo, %7d in cache) with density %4.1f / minute, accumulated range [$cache_info], block stored range [%s..%s], left vol %-7s, progress %.1f%%", 
                                     count($data), $added, $cache_size, $last_density,
                                     color_ts( $block->min_avail),                                
-                                    color_ts( $block->max_avail),
-                                    format_qty($left_volume));
+                                    color_ts( $block->max_avail), 
+                                    format_qty($left_volume), $pp);
                     }   // if mini_cache loaded 
                     elseif (is_array($data) ) {
                         if ($block->attempts_bwd > 2 && $block->attempts_fwd > 2) {
