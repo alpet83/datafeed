@@ -55,6 +55,7 @@
         protected   $table_create_code = ''; // for MySQL loaded by CorrectTable 
         protected   $table_create_code_ch = ''; // for ClickHouse loaded by CorrectTable
         protected   $table_engine = '';
+        protected   $table_info = null;        // record describes stats for table bigdata (start_part, end_part, min_time, max_time, size)
         protected   $table_need_recovery = false;
 
         protected   $total_requests = 0;
@@ -200,16 +201,14 @@ SKIP_DOWNLOAD:
 
         public function db_first(bool $as_str = true, int $tp = 0) {
             $ts = sqli_df()->select_value('MIN(ts)', $this->table_name);
-            if ($ts === null || str_in($ts, '1970'))  
-                return 0;
-
-            if ($as_str || !is_string($ts))
-                return $ts;
-            else
-                return $this->TimeStampDecode($ts, $tp);
+            return $this->db_timestamp($ts, $as_str, $tp);
         }
         public function db_last(bool $as_str = true, int $tp = 0) {            
             $ts = sqli_df()->select_value('MAX(ts)', $this->table_name);
+            return $this->db_timestamp($ts, $as_str, $tp);
+        }
+        
+        protected function db_timestamp(mixed $ts, bool $as_str = true, int $tp = 0): mixed {
             if ($ts === null || str_in($ts, '1970'))
                 return 0;            
 
@@ -218,7 +217,6 @@ SKIP_DOWNLOAD:
             else
                 return $this->TimeStampDecode($ts, $tp);
         }
-        
 
         public   function  loaded_full() {                        
             $lb = $this->last_block;
@@ -236,7 +234,9 @@ SKIP_DOWNLOAD:
 
             $qlist = [];
             $table_name = $this->table_name;
-            $this->table_create_code = null;            
+            $this->table_create_code = null;          
+            
+            $hour = date('H');
             
             // TODO: Not RC. removing obsolete tables
             $query = sprintf("DROP TABLE iF EXISTS `%s.%s__%s`", DB_NAME, $this->data_name, $this->ticker);
@@ -283,8 +283,8 @@ SKIP_DOWNLOAD:
                 if (is_object($res))
                     $row = $res->fetchOne();                
                 $table_code = is_array($row) ? strval($row['statement']) ?? '' : '';
-                $this->table_create_code_ch = $table_code;
-                if (is_string($table_code)) 
+                $this->table_create_code_ch = $table_code;                
+                if (is_string($table_code) && 22 == $hour) 
                     $res = $chdb->write("OPTIMIZE TABLE $table_name FINAL");                    
                 
                 
@@ -304,12 +304,24 @@ SKIP_DOWNLOAD:
             // здесь процесс пойдет, если mysqli_df - подключен к ClickHouse вместо chdb    
             if ($mysqli_df->is_clickhouse()) {
                 $res = true;
-                $mysqli_df->try_query("CHECK TABLE $table_name");                
-                $param = $table_code && str_in($table_code, $valid_engine) ? 'FINAL' : '';                                                
-                $res = $mysqli_df->try_query("OPTIMIZE TABLE $table_name $param");
-                $this->table_need_recovery |= !$res && str_in($mysqli_df->error, 'Unknown codec family code');
+                $this->QueryTableInfo($mysqli_df);
+
+                if (20 == $hour)
+                    $mysqli_df->try_query("CHECK TABLE $table_name");                                
+
                 
-                if ($this->table_need_recovery)  {                    
+                if (23 == $hour) {                    
+                    $param = '';
+                    $meta = this->table_info;
+                    if (is_object($meta) && isset($meta->end_part)) 
+                        $param .= " PARTITION '{$meta->end_part}'"; // in practice it's took too much time for 1B+ rows without PARTITION clause
+                    $param .= $table_code && str_in($table_code, $valid_engine) ? 'FINAL' : '';                     
+                    $res = $mysqli_df->try_query("OPTIMIZE TABLE $table_name $param DEDUPLICATE"); 
+                    $this->table_need_recovery |= !$res && str_in($mysqli_df->error, 'Unknown codec family code');
+                }
+                
+                if ($this->table_need_recovery)  {             
+                    // TODO: here need using current prototype code for recreation or REPLACE TABLE
                     $dmg_name = "{$table_name}_dmg";
                     if ($mysqli_df->try_query("RENAME $table_name TO $dmg_name") &&
                         $mysqli_df->try_query("CREATE TABLE $table_name LIKE $dmg_name") &&
@@ -510,7 +522,8 @@ SKIP_CHECKS:
                         break;
                     }                   
 
-                    if (!$mgr->active) {
+                    $minute = date('i') * 1;
+                    if (!$mgr->active || $minute >= 58 ) {
                         $this->last_error = "script going to termination";
                         break;
                     }
@@ -577,22 +590,9 @@ SKIP_CHECKS:
                             $before_ms = time_ms();                            
                             log_cmsg("~C04~C93#TAIL_DOWNLOAD({$block->loops}):~C00 right block side before now");
                         }                        
-                    }                                         
-                    elseif ( $block->Covers_ms($before_ms) && $block->attempts_bwd < 3) {  // $block->max_avail - $block->lbound > 300 &&
-                        // самый базовый сценарий загрузки исторических блоков, заполнение справа налево - сначала свежие данные                      
-                        if ($block->LoadedBackward($before_ms)) {
-                            $block->attempts_bwd ++;                        
-                            $txt = 'RELOAD';
-                        }
-                        else
-                            $block->attempts_bwd = 0;
-                        $info = $block->min_avail > $block->lbound ? sprintf('filled %d up to %s ', $block->fills, color_ts($block->min_avail)) : 'empty';                    
-                        log_cmsg(" ~C36 <<< #BLOCK_HEAD_$txt:~C00 block %s $info, requesting left completion before %s, target volume %s", 
-                                    $block_id, color_ts($before_ms / 1000), format_qty($block->target_volume));
                     }
-                    elseif ( $block->Covers_ms($after_ms) && $block->attempts_fwd < 3 && count($block) > 0) { // $block->rbound - $block->max_avail > 300 &&
-                        // обычно кусочек справа может быть не загружен лишь формально, т.к. сделок в последние часы не было. Но для уверенности в кэше должны появиться записи с большей чем правая граница блока. 
-                        // выполнение этого кода очень желательно, после того как будет загружена голова блока (стартовые данные), дабы заполнение шло влево
+                    elseif ( $block->Covers_ms($after_ms) && $block->attempts_fwd < 3 && count($block) > 0) { // $block->rbound - $block->max_avail > 300 &&                        
+                        // выполнение этого кода очень желательно, чтобы история ложилась в БД последовательно хотя-бы внутри дня. Это оптимизирует доступ для волатильной истории
                         if ($block->LoadedForward($after_ms)) {
                             $block->attempts_fwd ++;
                             $txt = 'RELOAD';
@@ -602,7 +602,19 @@ SKIP_CHECKS:
                         log_cmsg(" ~C36 >>> #BLOCK_TAIL_$txt:~C00 block %s filled %d before %s, requesting right completion, target volume %s",  
                                         $block_id, $block->filled, format_tms($after_ms), format_qty($block->target_volume));                        
                         $reverse = false;                        
-                    }        
+                    }                                         
+                    elseif ( $block->Covers_ms($before_ms) && $block->attempts_bwd < 3) {  // $block->max_avail - $block->lbound > 300 &&
+                        // загрузка справа налево, при нормальных данных этого не должно случаться
+                        if ($block->LoadedBackward($before_ms)) {
+                            $block->attempts_bwd ++;                        
+                            $txt = 'RELOAD';
+                        }
+                        else
+                            $block->attempts_bwd = 0;
+                        $info = $block->min_avail > $block->lbound ? sprintf('filled %d up to %s ', $block->fills, color_ts($block->min_avail)) : 'empty';                    
+                        log_cmsg(" ~C36 <<< #BLOCK_HEAD_$txt:~C00 block %s $info, requesting left completion before %s, target volume %s", 
+                                    $block_id, color_ts($before_ms / 1000), format_qty($block->target_volume));
+                    }                            
                     elseif (count($cache) > 0) {  // все варианты попробованы, остается пропуск
                         $data = [];
                         $this->cache_hit = true;                                        
@@ -880,10 +892,20 @@ SKIP_CHECKS:
             return $data;
         }
 
-        public function QueryTimeRange() { // request lowes and highest timestamps            
+
+        public function QueryTableInfo(mixed $conn): ?stdClass {            
+            if (is_object($conn) && $conn instanceof mysqli_ex && $conn->is_clickhouse()) {
+                $db_name = $conn->active_db();
+                $this->table_info = $conn->select_row('MIN(partition) as start_part, MAX(partition) as end_part, MIN(min_time) AS min_time, MAX(max_time) AS max_time, SUM(rows) as size', 'system.parts',
+                                                "WHERE (table = '$this->table_name') AND (active = 1) AND (rows > 0) AND (database = '$db_name')", MYSQLI_OBJECT);   
+            }
+            // TODO: need also implementation for chdb & MySQL native
+            return $this->table_info;                                               
+        } 
+        public function QueryTimeRange(): array { // request lowes and highest timestamps            
             $range = [false, false];
-            $after = format_ts( EXCHANGE_START_SEC);            
-            sqli_df()->try_query("DELETE FROM {$this->table_name} WHERE ts < '$after'"); // remove invalid data
+            $after = format_ts( EXCHANGE_START_SEC);                            
+            
             $min = $this->db_select_value('MIN(ts)',  '');
             $max = $this->db_select_value('MAX(ts)',  '');                           
             $min_t = strtotime($min);

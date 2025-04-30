@@ -1,11 +1,8 @@
 <?php
     require_once('proto_manager.php');
     require_once 'bmx_websocket.php';        
+    require_once 'lib/bitmex_common.php';    
 
-    const DB_NAME = 'bitmex'; // same as exchange
-
-    define('EXCHANGE_START', strtotime_ms('2014-01-01 00:00')); // указывать лучше день начала работы биржи, до минут
-    define('EXCHANGE_START_SEC', floor(EXCHANGE_START / 1000));
     
     abstract class BitMEXDownloadManager 
         extends DownloadManager {       

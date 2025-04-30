@@ -5,6 +5,7 @@ use Dom\Element;
 
 
     const DB_NAME = 'bitfinex';
+    const HISTORY_MIN_TS = '2015-01-01 00:00:00'; // minimal history start for initial download
 
     define('EXCHANGE_START', strtotime_ms('2013-04-01 00:00')); // указывать лучше день начала работы биржи, до минут
     define('EXCHANGE_START_SEC', floor(EXCHANGE_START / 1000));
