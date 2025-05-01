@@ -167,8 +167,10 @@
         }
 
 
-        public function FillDummy() { // Move to base class?
-            $ts = false;                            
+        public function FillDummy() { 
+            $ts = false;                    
+            if (!method_exists($this, 'AddDummy')) return;
+            
             if (0 == $this->fills) {
                 log_cmsg("~C31#WARN:~C00 block %d:%s have no fills in session, no dummies added", $this->index, $this->key);                                                    
                 return;

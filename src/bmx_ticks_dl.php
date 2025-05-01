@@ -59,15 +59,17 @@
    
         public function HistoryFirst(): bool|int {            
             // получение начала истории тиков
+            if ($this->history_first > 0)
+                return $this->history_first;
             $params = ['symbol' => $this->symbol, 'start' => 0, 'count' => 2];
-            $url = $this->rest_api_url.'trade';
+            $url = "{$this->rest_api_url}trade";
             $json = $this->api_request($url, $params, SECONDS_PER_DAY); // not ask for 24H
             $data = json_decode($json);
             if (is_array($data) && count($data) > 0) {
                 $rec = $data[0];
                 $min = strtotime(HISTORY_MIN_TS);
                 $t_first = $this->TimeStampDecode($rec->timestamp, 1); // need seconds
-                return max($min, $t_first); // ограничение глубины данных в прошлое!!
+                return $this->history_first = max($min, $t_first); // ограничение глубины данных в прошлое!!
             }
             return false;    
         }
@@ -139,8 +141,8 @@
         }        
 
         public function LoadTicks(DataBlock $block, string $ts_from, bool $backward_scan = true, int $limit = 1000): ?array {
-            $url = $this->rest_api_url.'trade';
-            $params = ['symbol' => $this->symbol, 'count' => $limit, 'columns' => 'side,price,size,trdMatchID'];
+            $url = "{$this->rest_api_url}trade";
+            $params = ['symbol' => $this->symbol, 'count' => $limit, 'columns' => 'side,price,size,trdMatchID', 'filter' => '{"trdType":"Regular"}'];
             $tkey = $backward_scan ? 'endTime' : 'startTime';
             $params[$tkey] = $ts_from;
             $params['reverse'] = $backward_scan ? 'true' : 'false';

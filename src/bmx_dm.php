@@ -42,10 +42,17 @@
                     else
                         $this->on_subscribe($args);
                 }               
-            } elseif ('info' == $event && isset($data->platform)) {
-                log_cmsg("~C97 #WS_CONNECT~C00: %s %s", json_encode($event), json_encode($data->platform));
-                $this->ws_active = true;
-                $this->SubscribeWS();
+            } elseif ('info' == $event) {
+                $info = $data->info ?? '';
+                if (isset($data->platform))
+                    log_cmsg("~C97 #WS_INFO~C00: %s %s", $info, json_encode($data->platform));
+                elseif (isset($data->version))
+                    log_cmsg("~C97 #WS_INFO~C00: %s %s", $info, $data->version);
+                
+                if (str_in($info, 'Welcome')) {
+                    $this->ws_active = true;
+                    $this->SubscribeWS();
+                }
                 // if (1 == $data->platform->status)     $this->SubscribeWS();
             } //*/
             else
@@ -75,7 +82,8 @@
                 $downloader = $this->Loader ($n_loader);    
                 if (!str_in($downloader->symbol, 'XBT') || !$downloader->IsRealtime()) continue; // only BTC pairs 
                 if (count($args) >= 10) continue;
-                $args []=  $this->ws_data_kind.':'.$downloader->symbol;
+                $args []= "{$this->ws_data_kind}:{$downloader->symbol}";
+                $this->ws_sub_started[$downloader->pair_id] = time();
                 log_cmsg("~C97 #WS_SUB~C00: symbol = %s", $downloader->symbol);                                
                 
             }
@@ -155,12 +163,10 @@
                     $sfx = $imp > 0 ? 'data' : 'void';                    
                 }
                 elseif (isset($rec->info)) {
-                    if (str_in($rec->info, 'Welcome')) 
-                        $this->ready_subscribe = time() + 3;
-                    log_cmsg("~C97 #WS_INFO:~C00 %s %s", $rec->info, $rec->version ?? '');
+                    $this->on_ws_event('info', $rec);                    
                     $sfx = 'msg';
                 }
-                elseif (isset($rec->foreignNotionalX)) {
+                elseif (isset($rec->foreignNotional)) {
                     // nothing to do 
                     $sfx = 'flood';
                 }
@@ -202,7 +208,6 @@
 
             foreach ($this->loaders as $pair_id => $downloader) {                
                 if ($downloader->IsRealtime()) $max ++;
-
                 if (!is_object($downloader) || !$downloader->IsRealtime() || $downloader->ws_sub) {
                     $already += $downloader->ws_sub ? 1 : 0;
                     continue;                

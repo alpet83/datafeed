@@ -92,8 +92,9 @@
             $day_start = floor_to_day(time());  
             $class = $this->block_class;                      
             $this->first_block = new $class($this, EXCHANGE_START_SEC,  $day_start - 1); // HistoryFirst must adjust block bounds later                                   
-            $this->first_block->index -2;
+            $this->first_block->index = -2;
             $this->last_block = new $class($this, $day_start, END_OF_TODAY);            
+            $this->last_block->index = -1;
             if (0 === stripos($this->symbol, 'BTCUSD') || 0 === stripos($this->symbol, 'ETHUSD'))
                 $this->normal_delay = 30;             
         }
@@ -126,8 +127,8 @@
                     $res = $this->rqs_cache_map[$key];
                     $len = strlen($res);
                     $info = $len > 20 ? "~C37 length~C96 $len~C00" : $res;
-                    log_cmsg("\t~C31#CACHE_HIT~C00: requesting data was already performed before (expired at %s). By key %s returns from cached %s ",
-                                $last_tss, $key,  $info);               
+                    log_cmsg("\t~C31#CACHE_HIT~C00: requesting data %s was already performed before (expired at %s). By key %s returns from cached %s ",
+                                json_encode($params), $last_tss, $key,  $info);               
                     return $res;
                 }
             }          
@@ -341,6 +342,42 @@ DUMP_SQL:
                        
             // log_cmsg("~C04~C97#REQUEST:~C00 %s", shell_exec("~/chdb $fname"));
         }
+
+
+        public function CleanupBlock(DataBlock $block) { // possible override in child class
+            global $chdb, $mysqli_df;
+            if (1 == $this->days_per_block)
+                $bounds = "Date(ts) = '{$block->key}'";
+            else {
+                $from_ts = $this->TimeStampEncode($block->lbound, 1);
+                $to_ts =   $this->TimeStampEncode($this->time_precision == 1 ? $block->rbound : $block->rbound_ms );                                    
+                $bounds = "(ts >= '$from_ts') AND (ts <= '$to_ts')";
+            }
+
+            $res = false;
+            $query = "DELETE FROM {$this->table_name} WHERE $bounds";                                        
+            $count = $mysqli_df->select_value("COUNT(*)", $this->table_name, "WHERE $bounds");
+            if ($mysqli_df->table_exists($this->table_name))                     
+                $res = $mysqli_df->try_query($query); // remove excess data                   
+            
+            $data_info = $res ? format_color("Removed %d rows from %s %s bounds [%s]", $count, $mysqli_df->server_info, $this->table_name, $bounds) : 
+                                format_color("~C91Failed~C00  remove existing data: %s", $mysqli_df->error);                                    
+            if ($chdb)
+                try {
+                    $stmt = $chdb->write($query);
+                    if (!is_object($stmt) ||$stmt->isError()) 
+                        $data_info .= format_color("~C91Failed~C00 query %s on ClickHouse", $query);
+                    elseif (is_object($stmt))
+                        $data_info .= ", from ClickHouse some rows removed";
+                } 
+                catch (Exception $e) {
+                    log_cmsg("~C91#ERROR:~C00 query failed on ClickHouse: %s", $e->getMessage());
+                }
+            log_cmsg("~C04~C93 #BLOCK_CLEAN: ~C00  $data_info");    
+            $block->Reset(); // min/max avail must be reseted   
+            $block->db_need_clean = false;
+        }
+
         public function CreateBlock(int $start, int $end): DataBlock {
             $block_class = $this->block_class;
             $block = new $block_class($this, $start, $end); // in real implementation is cache of ticks or candles
@@ -451,27 +488,23 @@ DUMP_SQL:
                 $block->code = BLOCK_CODE::INVALID;
                 return 0;   
             }            
+
+            if ($block->rbound - $block->lbound > $this->days_per_block * SECONDS_PER_DAY) {
+                $block->code = BLOCK_CODE::INVALID;
+                log_cmsg("~C91 #ERROR:~C00 block range to invalid (too big), cleanup disabled: %s", strval($block));
+                return 0;
+            }
 SKIP_CHECKS:            
-            if ($block->db_need_clean) {
+
+            $ps = $block->db_need_clean ? 'RELOAD' : 'DOWNLOAD';
+            if ($index >= 0)
+                log_cmsg("~C93#BLOCK_{$ps}_CYCLE($ticker):~C00  %s ", strval($block));            
+
+            $this->OnBeginDownload($block);
+
+            if ($block->db_need_clean) {                    
                 // remove for reliable overwrite
-                $from_ts = $this->TimeStampEncode($block->lbound );
-                $to_ts =   $this->TimeStampEncode($block->rbound);
-                $query = "DELETE FROM {$this->table_name} WHERE (ts >= '$from_ts') AND (ts <= '$to_ts')";                                        
-                $res = $mysqli_df ->try_query($query); // remove excess data                    
-                $data_info = $res ? format_color("Removed %d rows from MySQL", $mysqli_df->affected_rows) : "~C91Failed remove exist data: ~C00{$mysqli_df->error}";                                    
-                if ($chdb)
-                    try {
-                        $stmt = $chdb->write($query);
-                        if (!is_object($stmt) ||$stmt->isError()) 
-                            $data_info .= format_color("~C91Failed~C00 query %s on ClickHouse", $query);
-                        elseif (is_object($stmt))
-                            $data_info .= ", from ClickHouse some rows removed";
-                    } 
-                    catch (Exception $e) {
-                        log_cmsg("~C91#ERROR:~C00 query failed on ClickHouse: %s", $e->getMessage());
-                    }
-                log_cmsg("~C04~C93 #BLOCK_CLEAN: ~C00  $data_info");    
-                $block->Reset(); // min/max avail must be reseted   
+                $this->CleanupBlock($block);
             }
 
 
@@ -504,18 +537,17 @@ SKIP_CHECKS:
             $dstart = floor( time() / SECONDS_PER_DAY ) * SECONDS_PER_DAY; 
             $hstart = floor(time() / 3600) * 3600; 
 
-            if ($index >= 0)
-                log_cmsg("~C93#BLOCK_DOWNLOAD_CYCLE($ticker):~C00  %s, before_ms %s ", strval($block), format_tms($before_ms));
+               
             $cache = $this->cache;
             $cache->key = 'main';
             $cache->OnUpdate();
-            $this->OnBeginDownload($block);
+            
             $round_max = 60000; 
             $last_density = 0;
             try {
             // блок загружается справа - налево, заполняясь с хвоста
                 while ($before_ms > $lbound_ms || $lag_right > 300) {
-                    //  =============================================================================================       
+                    //  =============================================================================================                           
                     $now = time();
                     if ($block->loops >= 1500) {
                         $this->last_error = "loop count reach {$block->loops}, probably infinite loop";
@@ -571,8 +603,10 @@ SKIP_CHECKS:
                     $block_id = "$index:{$block->key}";          
                     $txt = 'LOAD';                              
                     
-                    if ($index < 0) { // last block, need tail load                                                        
+                    if ($block->index < 0) { // last block, need tail load                                                        
                         if ($now < $block->next_retry) break;
+                        $reverse = false; // default forward scan
+
                         $block->next_retry = $now + 60; // not to frequiently...                        
                         if ($block->lbound < $dstart && 1 == $this->days_per_block) 
                             log_cmsg("~C91 #ERROR:~C00 last(tail) block have range [%s..%s]", 
@@ -580,18 +614,21 @@ SKIP_CHECKS:
                         // from hour start if initial
                         $tail = $block->max_avail > $block->lbound ? $block->max_avail : time() - 180;                                        
                         $tail = max($tail, $hstart);       
-                        if ($block->max_avail <= $hstart && !$block->LoadedForward($after_ms)) {  // means no records in this hour, or initial download                             
-                            $reverse = false;         
+                        $after_ms = min ($after_ms, $hstart * 1000);
+                        if ($block->max_avail <= $hstart && !$block->LoadedForward($after_ms)) {  // means no records in this hour, or initial download                                                               
                             $from_ts = date_ms('Y-m-d H:00:00', $after_ms);                             
                             $after_ms = $this->TimeStampDecode($from_ts, 3); 
-                            log_cmsg("~C04~C93#TAIL_DOWNLOAD({$block->loops}):~C00 right block side after %s, next attempt planned at %s", color_ts($from_ts), color_ts($block->next_retry));
+                            log_cmsg("~C04~C93#TAIL_DOWNLOAD_FWD({$block->loops}):~C00 right block side after %s, next attempt planned at %s", color_ts($from_ts), color_ts($block->next_retry));
                         }
                         elseif ($block->loops <= 0 && !$block->LoadedBackward($before_ms, 30000)) {  
+                            $reverse = true;
                             $before_ms = time_ms();                            
-                            log_cmsg("~C04~C93#TAIL_DOWNLOAD({$block->loops}):~C00 right block side before now");
-                        }                        
+                            log_cmsg("~C04~C93#TAIL_DOWNLOAD_BWD({$block->loops}):~C00 right block side before now");
+                        }          
+                        else
+                            log_cmsg("~C04~C97#TAIL_UPDATE:~C00 loading forward from %s", color_ts($after_ms));              
                     }
-                    elseif ( $block->Covers_ms($after_ms) && $block->attempts_fwd < 3 && count($block) > 0) { // $block->rbound - $block->max_avail > 300 &&                        
+                    elseif ( $block->Covers_ms($after_ms) && $block->attempts_fwd < 3) { // $block->rbound - $block->max_avail > 300 &&                        
                         // выполнение этого кода очень желательно, чтобы история ложилась в БД последовательно хотя-бы внутри дня. Это оптимизирует доступ для волатильной истории
                         if ($block->LoadedForward($after_ms)) {
                             $block->attempts_fwd ++;
@@ -603,7 +640,7 @@ SKIP_CHECKS:
                                         $block_id, $block->filled, format_tms($after_ms), format_qty($block->target_volume));                        
                         $reverse = false;                        
                     }                                         
-                    elseif ( $block->Covers_ms($before_ms) && $block->attempts_bwd < 3) {  // $block->max_avail - $block->lbound > 300 &&
+                    elseif ( $block->Covers_ms($before_ms) && $block->attempts_bwd < 3 && count($block) > 0) {  // $block->max_avail - $block->lbound > 300 &&
                         // загрузка справа налево, при нормальных данных этого не должно случаться
                         if ($block->LoadedBackward($before_ms)) {
                             $block->attempts_bwd ++;                        
@@ -636,7 +673,11 @@ SKIP_CHECKS:
                         log_cmsg("~C91#WARN:~C00 rqs_avail = %d, breaking...", $rqs_avail);
                         break;
                     }
+                    
                     set_time_limit(45);                                            
+                    
+                    if ($reverse && $after_ms > time_ms())
+                        log_cmsg("~C31 #WARN:~C00 trying look to future after %s", format_tms($after_ms));
 
                     $t_from = $reverse ? $before_ms : $after_ms;    
                     verify_timestamp_ms($t_from, 't_from before load block '.strval($block));                    
@@ -953,8 +994,9 @@ SKIP_CHECKS:
                 $this->CorrectTable();
 
             $this->QueryTimeRange();
-
-            $start = $this->HistoryFirst();                    
+            
+            $start = $this->HistoryFirst(); // method should cache return value in this->history_first                    
+            
             $start = floor($start); // if float => seconds
             if (!is_int($start))
                  $start = EXCHANGE_START_SEC;  // using abstract history start

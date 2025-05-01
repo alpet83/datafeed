@@ -6,9 +6,7 @@
     require_once("loader_proto.php");
     require_once("blocks_loader.php");
 
-    # NOTE: all timestamps are in seconds, rounded
-    const HISTORY_MIN_TS = '2013-01-01 00:00:00'; // minimal history start
-
+    # NOTE: all timestamps are in seconds, rounded    
     const CANDLE_FLAG_RTMS      = 0x0400;  // realtime sync
     const CANDLE_FLAG_DUMMY     = 0x1000;
     

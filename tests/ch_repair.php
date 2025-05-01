@@ -1,4 +1,6 @@
 <?php
+    /*  Inaccurate shutdown can damage some partitions for ClickHouse data. This script allows detect and repair damaged tables (skipping unreadable partitions). 
+    */
     require_once 'lib/common.php';
     require_once 'lib/esctext.php';
     require_once 'lib/db_config.php';
@@ -15,7 +17,7 @@
 
     function copy_partitions(string $source, string $target): int {
         global $conn, $db_name;
-        $parts = $conn->select_map('partition,active', 'system.parts', "FINAL WHERE table = '$source' AND active = 1 AND database = '$db_name'");
+        $parts = $conn->select_map('partition,active', 'system.parts', "WHERE table = '$source' AND active = 1 AND database = '$db_name'");
         if (empty($parts))
             return 0;
         $good = 0;
