@@ -19,6 +19,11 @@
          * @var array
          */
         public     array $candle_map = [];  
+
+
+        public     $daily_candle = null;  // для хранения дневной свечи
+        public     $minutes_volume = 0; // for reconstruction need check
+
         public     array $unfilled_vol = [];
 
         public function __toString() {
@@ -99,6 +104,9 @@
             $saldo_cv = 0;
             $bounds = "Date(ts) = '{$this->key}'";
             $map = $mysqli->select_rows('ts,open,close,high,low,volume', $c_table, "WHERE $bounds", MYSQLI_NUM); // load from MySQL
+            $this->daily_candle = $daily =  $mysqli->select_rows('ts,open,close,high,low,volume', "{$c_table}__1D", "WHERE $bounds", MYSQLI_OBJECT); // load from MySQL
+            if (is_object($daily) && $daily->volume > $this->target_volume)
+                $this->target = $daily->volume;
 
             $full_refill = [];
 
@@ -275,6 +283,8 @@
         extends BlockDataDownloader {
 
         protected $scan_year = 0;
+
+        protected bool $reconstruct_candles = true;
             
         public function __construct(DownloadManager $mngr, stdClass $ti) {
             $this->import_method = 'ImportTicks';
@@ -348,7 +358,6 @@
         public function FlushCache() {
             $cache_size = count($this->cache);
             $start = $this->cache->oldest_ms();
-
             $saved = $this->SaveToDB($this->cache);
             $this->rest_loads += $saved;
             $part = date_ms('Y-m-01', $start);
@@ -417,19 +426,23 @@
                 $this->scan_year --;
             
             $year = $this->scan_year;
-            $start = max($start, strtotime(HISTORY_MIN_TS));                        
-            if (date('Y', $start) > $year) // ненужно сканировать глубже
+
+            $month = date('H') % 12 + 1; // scan single partition on DB - better efficiency. Full history covered twice per day
+            $start = max($start, strtotime(HISTORY_MIN_TS));                                  
+            if (strtotime("$year-$month-01") < $start) // ненужно сканировать глубже
                 return;     
             
-            log_cmsg("~C96#PERF(ScanIncomplete):~C00 gathering stats for %s, checking year %d ", $table_name, $year);
+            log_cmsg("~C96#PERF(ScanIncomplete):~C00 gathering stats for %s, checking period %d-%02d ", $table_name, $year, $month);
 RESTART:                
             $ts_start = format_ts($start);                
+            $period = "( YEAR(ts) = $year ) AND ( MONTH(ts) = $month ) AND ( ts >= '$ts_start' )";
+
             // контрольная таблица - минутные свечи, что позволяет определить диапазон времени, в котором есть данные
             if ($mysqli_df->table_exists($candle_tab))  {                     
                 $columns = 'DATE(ts) as date, MIN(ts) as min, MAX(ts) as max, SUM(volume) as volume, COUNT(*) as count';            
-                $control_map = $mysqli_df->select_map($columns, $candle_tab, "FINAL WHERE YEAR(ts) = $year AND (ts >= '$ts_start') AND volume > 0 GROUP BY DATE(ts) -- control_map", MYSQLI_OBJECT);                
+                $control_map = $mysqli_df->select_map($columns, $candle_tab, "FINAL WHERE $period AND volume > 0 GROUP BY DATE(ts) -- control_map", MYSQLI_OBJECT);                
                 // control ClickHouse candles by MySQL daily candles
-                $ref_map = $mysqli->select_map($columns, $candle_tab, "WHERE YEAR(ts) = $year AND (ts >= '$ts_start') AND volume > 0 GROUP BY DATE(ts)", MYSQLI_OBJECT);                
+                $ref_map = $mysqli->select_map($columns, $candle_tab, "WHERE $period AND volume > 0 GROUP BY DATE(ts)", MYSQLI_OBJECT);                
                 foreach ($ref_map as $day => $rec) 
                     if (isset($control_map[$day])) {
                         $diff = $control_map[$day]->volume - $rec->volume;
@@ -452,12 +465,11 @@ RESTART:
                 goto RESTART;
             }
 
-            $extremums = $mysqli->select_map('DATE(ts) as date, low, high, close, volume', "{$candle_tab}__1D");
-
+            $extremums = $mysqli->select_map('DATE(ts), open, close, high, low, volume', "{$candle_tab}__1D", "WHERE $period ", MYSQLI_OBJECT);
             // таблица статистики по тикам: начало и конец истории внутри дня, сумма объема           
             // на большой выборке данных (в моем случае 1.3 млрд. строк) следующий запрос займет мягко говоря время (минуты!). Поэтому внедрено ограничение в год за раз     
             $days_map = $mysqli_df->select_map('DATE(ts) as date, MIN(ts) as min, MAX(ts) as max, MIN(price) as low, MAX(price) as high, SUM(amount) as volume', 
-                                                        $table_name, "FINAL WHERE YEAR(ts) = $year AND (ts >= '$ts_start') AND (amount > 0) GROUP BY DATE(ts);  -- days_map", MYSQLI_OBJECT);
+                                                        $table_name, "FINAL WHERE $period AND (amount > 0) GROUP BY DATE(ts);  -- days_map", MYSQLI_OBJECT);
             unset($control_map[$today]);                                                              
             unset($days_map[$today]);
             $unchecked = $control_map;
@@ -473,7 +485,8 @@ RESTART:
             $first_day = array_key_first($control_map);
 
             foreach ($control_map as $day => $cstat) {                    
-                if (!$mgr->active) break; // stop yet now
+                if (!$mgr->active) return;     // stop yet now
+                $mgr->ProcessWS(false);  // support WebSocket minimal latency
                 unset($unchecked[$day]);
                 $block = $this->DayBlock($day, $cstat->volume, false);
                 $sod_t = strtotime($day);                        
@@ -484,16 +497,19 @@ RESTART:
                     continue;
                 }                    
 
-                $candles_vol = $cstat->volume;              
+                $candles_vol = $cstat->volume;      
+                $block->minutes_volume = $candles_vol;         
                 $meta = $days_map[$day];
                 $last_price = 0;
                 $day_ex = $extremums[$day] ?? null;
-                if (is_object($day_ex))
-                    $candles_vol = $day_ex->volume; // more precision
+                if (is_object($day_ex) && $day_ex->volume * 0.9999 > $candles_vol) {
+                    $extra = $day_ex->volume - $candles_vol;
+                    log_cmsg("~C31 #VOLUME_MISMATCH({$this->ticker}):~C00 for %s candles: saldo %s < daily %s, diff = %s. Using from higher timeframe",
+                                 $day, format_qty($candles_vol), format_qty($day_ex->volume), format_qty($extra)); 
+                    $candles_vol =  $day_ex->volume; // 1D table can be manually patched, means have max priority                    
+                }
 
-
-                if ($meta->count > 0)
-                    $last_price = $mysqli_df->select_value('price', $table_name, "ORDER BY ts DESC");
+                    
                 $min = $meta->min;
                 $max = $meta->max;                    
                 $void_left  = max(0, $block->min_avail - strtotime($cstat->min)) / 60.0;
@@ -528,16 +544,24 @@ RESTART:
                             $excess = true;                                
                         }
                         $vol_info .= format_qty($vdiff) ;
-                    }   
-                    
-                }   
+                    }                       
+                }                   
 
-                if (is_object($day_ex)) {
-                    if ($day_ex->close != $last_price || $day_ex->high != $meta->high || $day_ex->low != $meta->low) {
-                        //  $incomplete = true;
-                        log_cmsg ('~C31 #PRICE_MISTMACH:~C00 ~C91inconsistent~C00 prices close / low / high: %f vs %f, %f vs %f, %f vs %f;', 
-                                        $day_ex->close, $last_price, $day_ex->low, $meta->low, $day_ex->high, $meta->high);
+                if (is_object($day_ex) && $incomplete) {
+                    $meta->close = $last_price = $mysqli_df->select_value('price', $table_name, "WHERE DATE(ts) = '$day' ORDER BY ts DESC");
+                    $diff_list = [];
+                    foreach (['low', 'high', 'close'] as $field) {
+                        if ($day_ex->$field != $meta->$field) 
+                            $diff_list []= format_color("%s %f != %f", $field, $day_ex->$field, $meta->$field);                            
                     }
+
+                    if (count($diff_list) > 0) {
+                        //  $incomplete = true;
+                        log_cmsg ('~C31 #PRICE_MISTMACH:~C00 ~C91inconsistent~C00 prices '.implode(', ', $diff_list));                                        
+                    } 
+                    else
+                        log_cmsg ('~C32 #PRICES_CHECKED:~C00 all daily equal low = %f, high = %f, close = %f', 
+                                            $meta->low, $meta->high, $last_price);
                 }               
                                 
 
@@ -598,8 +622,9 @@ RESTART:
             $first = $this->TimeStampEncode($start, 1);
             $last =  $this->TimeStampEncode( $end, 1);
             if (count($this->blocks_map) > 0) {
-                $first = array_key_first($this->blocks_map);
-                $last = array_key_last($this->blocks_map);
+                // WARN: blocks_map have backsorting 
+                $first = array_key_last($this->blocks_map);
+                $last = array_key_first($this->blocks_map);
             }
 
             $tag = $this->initialized ? '#RELOAD_BLOCKS' : '#INIT_BLOCKS';
@@ -707,19 +732,27 @@ RESTART:
             $diff = $block->target_volume - $check_volume;                 
             $diff_pp = 100 * $diff / max($block->target_volume, $check_volume, 0.01);
             $whole_load = false;
+            if ($this->reconstruct_candles && $block->index >= 0 && $block->target_volume > $block->minutes_volume)
+                $this->RecoveryCandles($block, true);  // recovery absent minute candles
+
             // для тиков целевой объем должен быть меньше или равен набранному, плюс минус погрешность-толерантность 
             if (abs($diff_pp) < $this->volume_tolerance && $diff >= 0) {
                 $whole_load = true;
                 log_cmsg("$prefix($symbol/$index):~C00 %s, lag left %5d, %s,\n\t\ttarget_volume reached %s in %d ticks, block summary %s, filled in session: %s ", 
                             strval($block), $lag_left, $block->info, format_qty($check_volume), $count, json_encode($check), $filled);    
+                if (-1 == $block->index)
+                     $this->RecoveryCandles($block);  // upgrade latest
+                
             } elseif ($block instanceof TicksCache) {
                 log_cmsg("~C04{$prefix}_WARN($symbol/$index):~C00 %s, lag left %d, %s, target_volume reached %s (saldo %s) instead %s (diff %.1f%%),\n\t\t $s_info block summary %s, filled in session: %s ", 
                             strval($block), $lag_left, $block->info, 
                                 format_qty($check_volume), format_qty($saldo_volume),
                                 format_qty($block->target_volume), $diff_pp, json_encode($check), $filled);    
+                
                 $fk = [];
                 $uk = [];
-                $vk = [];                    
+                $vk = [];
+                                    
                 foreach ($block->unfilled_vol as $mk => $v) {
                     if ($v > 0) 
                         $uk [$mk]= $v;
@@ -774,10 +807,7 @@ RESTART:
                     $block->code = BLOCK_CODE::FULL;
                     $block->info = "overlap by cache {$cache->key}";
                     unset($ublocks[$k]);
-                }
-
-
-            
+                }            
         }
 
         public function QueryTimeRange(): array {
@@ -797,6 +827,85 @@ RESTART:
             }                     
             return $result;                            
         }
+
+        protected function ReconstructCandles(array $source): array {
+            $c_map = []; // candles result            
+            foreach ($source as $tick) {
+                $tk = floor($tick[TICK_TMS] / 60000) * 60; // round to minute into seconds                
+                $tp = $tick[TICK_PRICE];
+                $tv = $tick[TICK_AMOUNT];
+                if (!isset($c_map[$tk])) 
+                    $c_map[$tk] = [$tp, $tp, $tp, $tp, $tv]; // all prices equal OCHL
+                else { 
+                    $c_map[$tk][CANDLE_HIGH] = max($c_map[$tk][CANDLE_HIGH], $tp);
+                    $c_map[$tk][CANDLE_LOW] = min($c_map[$tk][CANDLE_LOW], $tp);
+                    $c_map[$tk][CANDLE_CLOSE] = $tp;
+                    $c_map[$tk][CANDLE_VOLUME] += $tv;
+                }
+            } // aggregation cycle
+            ksort($c_map);
+            return $c_map;
+        }
+
+        protected function RecoveryCandles(TicksCache $block, bool $reconstruct = false) {
+            global $mysqli, $mysqli_df;
+            if (0 == count($block)) return;
+            $start = $block->oldest_ms();
+            $end = $block->newest_ms();
+            $candles_table = str_replace('ticks', 'candles', $this->table_name);
+            $source = $block->Export();            
+            $m_start = floor(time_ms() / 60000) * 60000;            
+            if (-1 == $block->index) {
+                $latest = [];
+                foreach ($source as $tick) 
+                    if ($tick[TICK_TMS] >= $m_start) 
+                        $latest []= $tick;                    
+                $c_map = $this->ReconstructCandles($latest);                                
+                if (count($c_map) > 0) {              
+                    [$o, $c, $h, $l, $v] = $c_map[0];    
+                    $ts = date_ms(SQL_TIMESTAMP, $m_start);
+                    $query = "UPDATE TABLE $candles_table SET `close` = $c, `volume` = $v  WHERE `ts` = '$ts' ";
+                    $mysqli->try_query($query);  
+                    $mysqli_df->try_query($query);    
+                }
+            }
+            
+            if (!$reconstruct) return;
+            $source = $block->Export();
+            $c_map = $this->ReconstructCandles($source);
+            $start_ts = date_ms(SQL_TIMESTAMP, $start);
+            $end_ts = date_ms(SQL_TIMESTAMP, $end);
+            $exists = $mysqli->select_map('ts,volume', $candles_table, "WHERE ts >= '$start_ts' AND ts <= '$end_ts'");
+            $rows = [];
+            $updated = 0;
+            $info = "EXISTS {$block->key}: ". print_r($exists, true);
+            $info .= "UPGRADE: ".print_r($c_map, true);
+            $mgr = $this->get_manager();
+            file_put_contents("{$mgr->tmp_dir}/candles_recovery.txt", $info);
+                        
+            foreach ($c_map as $tk => $rec) {
+                $ts = format_ts($tk);
+                [$o, $c, $h, $l, $v] = $rec;
+                if (isset($exists[$ts])) {
+                    $query = "UPDATE TABLE $candles_table SET `open` = $o, `close` = $c, `high` = $h, `low` = $l, `volume` = $v WHERE `ts` = '$ts'";
+                    if ($exists[$ts] < $v && $mysqli_df->try_query($query))
+                        $updated ++;
+                }
+                else    
+                    $rows []= "('$ts', $o, $c, $h, $l, $v)"; // insert lost candle
+            }
+            if (count($rows) > 0) {
+                $query = "INTO $candles_table (`ts`, `open`, `close`, `high`, `low`,`volume`) VALUES ";
+                $query .= implode(",\n", $rows);                
+                $res_m = $mysqli->try_query("INSERT IGNORE $query") ? 'success' : '~C91failed';
+                $res_c = $mysqli_df->try_query("INSERT $query") ? 'success' : '~C91failed';
+                log_cmsg("~C92#RECOVERY_CANDLES:~C00 %d missed candles inserted into %s, for MySQL %s, ClickHouse %s", 
+                            count($rows), $candles_table, $res_m, $res_c);
+            }
+            if ($updated > 0) 
+                log_cmsg("~C92#RECOVERY_CANDLES:~C00 %d candles updated in %s", $updated, $candles_table);            
+        }
+
 
         protected function SaveToDB(TicksCache $cache, bool $reset = true): int {                
             // multi-line insert
@@ -840,8 +949,9 @@ RESTART:
             $tmp_dir = $this->get_manager()->tmp_dir;
             $fname = "$tmp_dir/ticks_save_stat.json";
             $map = new stdClass();
-            if (file_exists($fname)) 
-                $map = file_load_json($fname, null ,false);
+            if (file_exists($fname)) {
+                $map = file_load_json($fname, null ,false) ?? $map; // possible return null if file damaged                 
+            }
             $symbol = $this->symbol;
             $map->$symbol = ['ts' => date(SQL_TIMESTAMP), 'rows' => count($cache), 'oldest' => $this->db_oldest, 'newest' => $this->db_newest];
             file_save_json($fname, $map);

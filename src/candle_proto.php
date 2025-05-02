@@ -215,8 +215,11 @@
 
             parent::CorrectTable();           
             $query = "DELETE FROM $table_name WHERE (open = 0) AND (volume = 4096)";
-            $mysqli->try_query($query); // remove invalid rows
-            if ($chdb)
+            if ($mysqli->try_query($query) && $chdb)  // remove invalid rows
+                $chdb->write($query);             
+                
+            $query = "DELETE FROM $table_name WHERE volume = 0 AND MINUTE(ts) > 0";
+            if ($mysqli->try_query($query) && $chdb)
                 $chdb->write($query);             
 
             if (strlen($this->table_create_code) < 10)
@@ -683,8 +686,10 @@
             $mysqli = sqli();
 
             $values = [];            
-            foreach ($cache->keys as $tk)                                               
-                $values []= $cache->FormatRow($tk);
+            foreach ($cache->keys as $tk) {                                               
+                if ($cache[$tk][CANDLE_VOLUME] > 0 || 0 == $tk % 3600)
+                    $values []= $cache->FormatRow($tk);
+            }
             
             $cntr = count($values);      
             if (0 == $cntr) return 0;             

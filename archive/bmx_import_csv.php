@@ -302,16 +302,26 @@
             if ($prev_count > 0) {
                 $droped = 0;      
                 ksort($parts);          
+                $ignored = [];
+                $day_ms = 86400 * 1000;
+                $min_tms = floor($min_tms / $day_ms) * $day_ms;
+                $last_month = date_ms('Y-m-01', $max_tms);
+                $last_month_tms = strtotime_ms($last_month);
                 foreach ($parts as $part => $used)  {
-                    $t_part = strtotime_ms($part);
-                    if ($t_part >= $min_tms && $t_part <= $max_tms) 
+                    $t_part = strtotime_ms($part); // раздел занимает один месяц в БД, удаление целиком экономит десятки секунд
+                    if ($t_part >= $min_tms && $t_part <= $last_month_tms) {
+                        log_cmsg("~C32 #CLEANUP_DROP_PARTITION:~C00 due %s in [%s .. %s]", $part, $start, $last_month);
                         $droped += $mysqli_df->try_query("ALTER TABLE $table_name DROP PARTITION ('$part')") ? 1 : 0; // optimize deletion in mass op
+                    }
+                    else
+                        $ignored []= $part;
                 }
                 
                 $avail  = $mysqli_df->select_value("COUNT(*)", $table_name, "FINAL WHERE $bounds");    
-                log_cmsg("~C96 #PERF_CLEANUP:~C00 removing existing data. Was droped %d / %d partitions for less writes. Avail now %d rows", $droped, count($parts), $avail);
+                log_cmsg("~C96 #PERF_CLEANUP:~C00 removing existing data. Was droped %d / %d partitions for less writes (except %s).", 
+                            $droped, count($parts), json_encode($ignored));
                 if ($avail > 0 && $mysqli_df->try_query($query))
-                    log_cmsg("~C94 #PERF_DELETE:~C00 cleanup complete, deleted %d rows", $prev_count);
+                    log_cmsg("~C94 #PERF_DELETE:~C00 slow cleanup complete, deleted %s rows", '~C95'.format_qty($avail));
             }
             log_cmsg("~C96 #PERF_INSERT:~C00 starting transfer data ticks__archive to %s ", $table_name);
             $t_start = pr_time();

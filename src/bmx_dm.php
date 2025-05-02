@@ -2,7 +2,6 @@
     require_once('proto_manager.php');
     require_once 'bmx_websocket.php';        
     require_once 'lib/bitmex_common.php';    
-
     
     abstract class BitMEXDownloadManager 
         extends DownloadManager {       
@@ -48,7 +47,7 @@
                     log_cmsg("~C97 #WS_INFO~C00: %s %s", $info, json_encode($data->platform));
                 elseif (isset($data->version))
                     log_cmsg("~C97 #WS_INFO~C00: %s %s", $info, $data->version);
-                
+
                 if (str_in($info, 'Welcome')) {
                     $this->ws_active = true;
                     $this->SubscribeWS();
@@ -193,7 +192,8 @@
                     log_cmsg("~C93#WS_STATS:~C00 %s", json_encode($this->ws_stats));          
                 file_save_json("$tmp_dir/ws_last_data-{$this->ws_data_kind}-$sfx.json", $rec);                
             } catch (Throwable $E) {                
-                log_cmsg("~C91#EXCEPTION:~C00 %s in %s", $E->getMessage(), $E->getTraceAsString());
+                log_cmsg("~C91#EXCEPTION(ProcessRecord):~C00 %s in %s:%d from: %s", 
+                        $E->getMessage(), $E->getFile(), $E->getLine(), $E->getTraceAsString());
                 log_cmsg("~C93#PARAMS_DATA:~C00 %s", print_r($rec, true));
             } // try
 

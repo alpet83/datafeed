@@ -23,6 +23,9 @@
     if (!isset($db_configs['datafeed'])) 
         error_exit("~C91#FATAL:~C97 datefeed~C00 DB config not exists, used %s for config", $fname);       
 
+    $mt = filemtime(__FILE__);
+    header("Content-version: script modified ".date(SQL_TIMESTAMP, $mt));
+
     $color_scheme = 'cli';
     $show_perf = rqs_param('perf', false);    
     $t_start = pr_time();

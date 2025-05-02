@@ -284,7 +284,7 @@
             } catch (Exception $E) {
                 $this->ws = null;
             }
-            
+
             $this->CreateWebsocket();            
             $this->subs_map = [];
             $this->platform_status = -1; // means unknown
@@ -638,4 +638,3 @@
         }
         
     }
-?>
