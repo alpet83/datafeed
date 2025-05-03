@@ -170,7 +170,7 @@
         public function FillDummy() { 
             $ts = false;                    
             if (!method_exists($this, 'AddDummy')) return;
-            
+
             if (0 == $this->fills) {
                 log_cmsg("~C31#WARN:~C00 block %d:%s have no fills in session, no dummies added", $this->index, $this->key);                                                    
                 return;
@@ -334,6 +334,7 @@
 
         public function Reset(bool $clean_cache = false) {
             $this->fills = 0;
+            $this->loops = 0;
             $this->cache_map = [];
             $this->max_avail = $this->lbound;
             $this->min_avail = $this->rbound;

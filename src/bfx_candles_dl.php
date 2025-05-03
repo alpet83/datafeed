@@ -155,7 +155,8 @@
                 $path = "candles/trade:1m:{$this->symbol}:p30/";                 
             $path .= 'hist'; //
             $tkey = $backward_scan ? 'end' : 'start';              
-            $params[$tkey] = strtotime_ms($ts_from);   // in ms 
+            $t = strtotime_ms($ts_from);   // in ms 
+            $params[$tkey] = round($t / 1000) * 1000; // на практике получается ругань при указании мс
             $res = $this->LoadData($block, $url.$path, $params, $ts_from, $backward_scan);                                    
             return $res;
         }

@@ -26,7 +26,11 @@
     function compare_blocks($a, $b): int {
         $ta = $a->lbound;
         $tb = $b->lbound;
-        return $ta < $tb ? - 1 : 1;  
+        if ($ta == $tb) {
+            log_cmsg("~C91#ERROR(compare_blocks):~C00 same lbound for %s and %s", strval($a), strval($b));
+            return 0;
+        }
+        return $ta < $tb ? 1 : -1;  
     }
 
     function swap_values(&$a, &$b) {
@@ -82,6 +86,10 @@
         $ts = str_replace( '12:00:00.000', 'noon', $ts);
         $ts = str_replace( '12:00:00', 'noon', $ts);
         return trim($ts, 'Z ');
+    }
+
+    function b2s(bool $b, array $map = ['~C91failed', 'success']): string {
+        return $b ? $map[1] : $map[0];
     }
 
     /**

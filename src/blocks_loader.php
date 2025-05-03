@@ -143,8 +143,15 @@
             if (!$latest && file_exists($cache_file)) { // для отладки пока без ограничения времени жизни кэша, это заблокирует обновление для динамических URL!
                 $res = file_get_contents($cache_file);
                 $this->cache_file_last = $cache_file;
-                log_cmsg("\t#PERF_CACHE:~C00 data loaded from %s, size = %d", $cache_file, strlen($res));
-                goto SKIP_DOWNLOAD;
+                $data = json_decode($res);                
+                if (is_array($data) || is_object($data)) {
+                    log_cmsg("\t#PERF_CACHE:~C00 data loaded from %s, size = %d", $cache_file, strlen($res));                
+                    goto SKIP_DOWNLOAD;
+                }
+                else  {
+                    log_cmsg("\t~C91 #WRONG_CACHE:~C00 bad/truncated data (decoded as %s) loaded from %s, size = %d, renamed", gettype($data), $cache_file, strlen($res));                
+                    rename($cache_file, str_replace('.json', '.bad', $cache_file));
+                }
             }
 
             $limiter = $this->manager->rate_limiter;
@@ -180,6 +187,8 @@ SKIP_DOWNLOAD:
             $today = date('Y-m-d'); // за текущий день слишком много запросов
             $forward = str_in($rqs_dbg, 'reverse=false') || str_in($rqs_dbg, 'sort=1');
             if (!$latest || str_in($rqs_dbg, ':00:00') && $forward) {
+                $res = str_replace('],[', "],\n[", $res); // pretty formatting json
+                $res = str_replace('},{', "},\n{", $res); // pretty formatting json
                 file_put_contents($cache_file, $res);
                 $this->cache_file_last = $cache_file;
                 $this->rqs_cache_map[$key] = $res; // пригодиться для не отлаженного перезапроса данных
@@ -587,6 +596,11 @@ SKIP_CHECKS:
                             $after_ms  = min($after_ms , $newest_ms);                                                                        
                             $before_ms = max($oldest_ms, $before_ms);                         
                         } else {
+                            // перезапросы одних и тех-же данных из-за плохой вертикальной валидации (минутки и тики Bitfinex), замедляют процесс слишком сильно. Сдвиг окна исчисляется минутами, хотя загружаются всякий раз - часы
+                            if ($cache->duplicates >= count($cache)) {
+                                $after_ms  = max($after_ms, $newest_ms);
+                                $before_ms = min($before_ms, $oldest_ms);
+                            }
                             $after_ms  = floor($after_ms / $round_step ) * $round_step;
                             $before_ms = ceil($before_ms / $round_step ) * $round_step;                                    
                         }
@@ -852,7 +866,8 @@ SKIP_CHECKS:
                                         $block_id, count($data), $block->attempts_bwd + $block->attempts_fwd, $this->last_error);                    
                     }
 
-                    $block->loops ++;                                                         
+                    $block->loops ++;             
+                    $cache->loops ++;                                            
                     
                     $mgr->ProcessWS(false); // обновления мимо кэша!
                     
@@ -916,7 +931,7 @@ SKIP_CHECKS:
             $block->last_api_request = $this->last_api_request;
             $data = json_decode($res, false);            
             if (false !== strpos($res, 'error') || !is_array($data))  {
-                log_cmsg("~C91#WARN: API request failed with response: %s", $res); // typical is ratelimit errro
+                log_cmsg("~C91#WARN: API request failed with response: %s %s", gettype($data), substr($res, 0, 200)); // typical is ratelimit errro
                 return null;
             }      
 
@@ -1107,7 +1122,7 @@ SKIP_CHECKS:
             if ($mgr->cycles < 2 || !$load_history) return $total_loads;
                     
             if ($n_blocks > 0) {
-                usort($this->blocks, 'compare_blocks'); // ascending by timestamp (lbound)
+                usort($this->blocks, 'compare_blocks'); // descending by timestamp (lbound)
                 $tmp = $mgr->tmp_dir;
                 $class = get_class($this);
                 $dump = json_encode($this->blocks);
@@ -1135,7 +1150,7 @@ SKIP_CHECKS:
             $prev_day = $this->cache->firstKey();
 
             // download history by mapping
-            while ($index >= 0 && $big_loads < $this->blocks_at_once) {
+            while ($index >= 0 && $big_loads < $this->blocks_at_once && $mgr->active) {
                 usefull_wait(100000);
                 $block = $this->blocks[$index];
                 $key = intval($block->code->value);                                

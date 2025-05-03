@@ -152,8 +152,8 @@
             $params = ['symbol' => $this->symbol, 'binSize' => '1m', 'count' => $limit];          
             $params ['columns'] = 'open,close,high,low,volume';
             $params ['reverse'] = $backward_scan ? 'true' : 'false';
-            $t_from = strtotime($ts_from);
-            
+            $tms = strtotime_ms($ts_from);            
+            $t_from = round($tms / 1000);
             if ($t_from % 60 > 0)
                 $t_from = $backward_scan ? ceil($t_from / 60) * 60 : floor($t_from / 60) * 60; // round to minutes, depends back/forward
                 

@@ -217,7 +217,7 @@
             $query = "DELETE FROM $table_name WHERE (open = 0) AND (volume = 4096)";
             if ($mysqli->try_query($query) && $chdb)  // remove invalid rows
                 $chdb->write($query);             
-                
+
             $query = "DELETE FROM $table_name WHERE volume = 0 AND MINUTE(ts) > 0";
             if ($mysqli->try_query($query) && $chdb)
                 $chdb->write($query);             
@@ -556,8 +556,11 @@
                     $query .= "WHERE date = '$date'";
                     sqli()->try_query($query);
                 }                
+                $problem = $vdiff > 0 ? 'PARTIAL' : 'EXCESS';
+                if (0 == $volume)
+                    $problem = 'EMPTY';
 
-                $msg = format_color("~C103~C31 #BLOCK_COMPLETE_WARN($symbol/$index): ~C00 %s have $volume_info $close_info, loaded %d, repairs %d, CR: %s", 
+                $msg = format_color("~C103~C31 #BLOCK_COMPLETE_$problem($symbol/$index): ~C00 %s have $volume_info $close_info, loaded %d, repairs %d, CR: %s", 
                                 strval($block), $loaded, $repairs, $block->info);                                         
                 $dump = []; 
                 foreach ($block->Export(0.000001) as $tk => $rec) 
@@ -575,7 +578,7 @@
                     $this->daily_map[$last_day][CANDLE_VOLUME] = $volume;
                 }                
 
-                file_put_contents("$tmp_dir/bad-{$this->ticker}-$date.txt", implode("\n", $dump));
+                file_put_contents("$tmp_dir/bad-{$this->ticker}-$date.txt", implode("\n", $dump));                
             }
             $prefix = $block->recovery ? 'recovery' : 'completed';            
             file_add_contents("$tmp_dir/$prefix-{$this->ticker}.log", tss()."$msg\n");                
@@ -736,7 +739,9 @@
             $mysqli_df = sqli_df();            
             $mgr = $this->get_manager();
             // TODO: add table with known voids, due exchange maintenance or other reasons
-            $tmp = $mgr->tmp_dir;
+            $tmp = "{$mgr->tmp_dir}/blocks/";
+            check_mkdir($tmp);
+
             $voids = [];                        
             $daily_map = $this->daily_map;
 
@@ -811,7 +816,7 @@
             $total_volume = 0;
             $total_volume_ch = 0;
 
-            krsort($scan_map); // from oldest to newest
+            ksort($scan_map); // from newest to oldest
             foreach ($scan_map as $cursor => $row) {                
                 if ($today_t <= $cursor) continue;   // skip today due is for last block        
                 $elps = time() - $scan_start;
@@ -882,21 +887,29 @@
                     $result ++;                   
                     $need_clean = true;
                     if ($close != $day_close && $exists) 
-                        $msg = format_color ("~C33#WRONG_DATA:~C00 for %s have close %f but day candle %s have different. Volume diff %s",
-                                             $day, $close, json_encode($row), format_qty($diff));                                    
+                        $msg = format_color ("~C33#WRONG_DATA:~C00 for %s have close %f but day candle %s have different. Volume diff %s, diff_pp %.1f",
+                                             $day, $close, json_encode($row), format_qty($diff), $diff_pp);                                    
                     elseif ($volume > $day_vol * 1.001) {                                              
                         $msg = format_color ("~C31#EXCESS_DATA:~C00 may be wrong instrument was mixed in table. Volume %s > %s (diff = %s) for %s", 
                                              format_qty($volume), format_qty($day_vol), format_qty($diff), $day);                        
                     }
                     else {
-                        $msg = format_color ("~C04~C97#INCOMPLETE_CHECK({$this->ticker}):~C00  for %s have volume %s in %d candles instead %s (diff %s %.2f%%).",
+                        $msg = format_color ("~C04~C97#INCOMPLETE_CHECK({$this->ticker}):~C00  for %s have volume %s in %d candles instead %s (diff %s %.2f)",
                                              $day, format_qty($volume),
                                              $count, format_qty($day_vol), format_qty($diff), $diff_pp);                                           
                         // $need_clean = false;                                             
                     }
                     
+                    $msg .= format_color(', repairs %d', $srec->repairs);
                     log_cmsg($msg);
-                    file_add_contents("$tmp/recovery-{$this->ticker}.log", tss()." $msg\n");           
+                    $log_name = "$tmp/recovery-{$this->ticker}.log";
+                    $log_lines = [];
+                    if (file_exists($log_name))
+                        $log_lines = file($log_name);
+
+                    $msg = tss()." $msg\n";
+                    if (!in_array($msg, $log_lines))                         
+                        file_add_contents($log_name, $msg);           
 
                     /* Этот вариант оптимизации использовать нельзя, если возможны несоответствия данных и ремонт, т.к. статистическая привязка - 1 день! 
                     $next_day = $cursor + SECONDS_PER_DAY;                                               

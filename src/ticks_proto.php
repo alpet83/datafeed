@@ -24,6 +24,7 @@
         public     $daily_candle = null;  // для хранения дневной свечи
         public     $minutes_volume = 0; // for reconstruction need check
 
+        public     array $refilled_vol = [];
         public     array $unfilled_vol = [];
 
         public function __toString() {
@@ -55,7 +56,7 @@
             return ($this->lbound + $mk * 60) * 1000;
         }
 
-        protected function CheckFillMinute(int $m, float $amount) {        
+        protected function CheckFillMinute(int $m, float $amount, bool $is_dup) {        
             if (!isset($this->unfilled_vol[$m]))
                 return;
 
@@ -63,6 +64,8 @@
             if (!isset($cm[$m])) 
                 log_cmsg("~C91#WARN:~C00 CheckFillMinute no candle record for minute %d", $m);                           
 
+            $this->refilled_vol[$m] = ($this->refilled_vol[$m] ?? 0) + $amount; // учитывается заполнение в т.ч. дублирующее
+            if ($is_dup) return;            
             $this->unfilled_vol[$m] = ($this->unfilled_vol[$m] ?? 0) - $amount;                         
             if ($this->unfilled_vol[$m] <= 0) 
                 unset($this->unfilled_vol[$m]);
@@ -110,6 +113,11 @@
 
             $full_refill = [];
 
+            if (!$map) {
+                log_cmsg("~C91 #WARN(LoadCandles):~C00 no 1m data for %s in MySQL", $c_table);
+                return;
+            }            
+
             foreach ($map as $candle) {
                 $t = strtotime(array_shift($candle));
                 if ($t < EXCHANGE_START_SEC) {
@@ -121,6 +129,7 @@
                 $cv = $candle[CANDLE_VOLUME];
                 $saldo_cv += $cv;
                 $full_refill[$key] = $cv * $inaccuracy; 
+                $this->refilled_vol[$key] = 0; // учитывается заполнение в т.ч. дублирующее
             }
             $this->unfilled_vol = $full_refill;
             if ($this->db_need_clean) return; // no optimize, need full refill
@@ -131,6 +140,9 @@
             $overhead = 0;
             $saldo = 0;
             $suspicous = [];
+
+            if (0 == count($vol_map)) return; // no ticks preloaded
+            
             
             foreach ($vol_map as $m => $v) {
                 $saldo += $v;
@@ -150,6 +162,8 @@
                 if (!$this->TestUnfilled($m)) 
                     unset($this->unfilled_vol[$m]); // сокращение работы
             }
+            
+
             if (0 == $saldo_cv) return;
 
             $this->db_need_clean |= $saldo > $saldo_cv; // force reload            
@@ -194,16 +208,17 @@
                 throw new ErrorException("Invalid tick record, price field must > 0 ".json_encode($row));
 
             $this->cache_map[$key] = $row;                    
+            $t = floor($row[TICK_TMS] / 1000);                            
             if ($is_dup)
                 $this->duplicates ++;
-            else {                
-                $t = floor($row[TICK_TMS] / 1000);                            
-                $this->set_filled($t);
-                if ($this->index >= -1) {  // в общем кэше нет смысла фиксировать минуты
-                    $m = $this->candle_key($t);
-                    $this->CheckFillMinute($m, $row[TICK_AMOUNT]);                
-                }               
-            }          
+            else 
+                $this->set_filled($t);            
+
+            if ($this->index >= -1) {  // в общем кэше нет смысла фиксировать минуты
+                $m = $this->candle_key($t);
+                $this->CheckFillMinute($m, $row[TICK_AMOUNT], $is_dup);                
+            }               
+                      
             return $this->Count();
         }
     
@@ -223,9 +238,14 @@
         }
 
         protected function TestUnfilled($m) {
-            // $cm = $this->candle_map[$m] ?? [0, 0, 0, 0, 0];
-            // $mv = $cm[CANDLE_VOLUME];
-            return $this->unfilled_vol[$m]  > 0; 
+            $cm = $this->candle_map[$m] ?? [0, 0, 0, 0, 0];
+            $mv = $cm[CANDLE_VOLUME];
+            if ($mv > 0) {
+                $rv = $this->refilled_vol[$m] ?? 0;            
+                return ($this->unfilled_vol[$m]  > 0) && ($rv < $mv * 1.5);  // чрезмерное покрытие дупликатами, тоже означает заполнение
+            }
+            else
+                return $this->unfilled_vol[$m]  > 0; // это странный вариант, но оставить пока
         } 
 
         public function UnfilledAfter(): int {
@@ -238,7 +258,7 @@
                     break;
                 }
 
-            return $this->get_rbound_ms();
+            return $this->get_lbound_ms();  // full reload suggest
         }
 
         public function UnfilledBefore(): int {         
@@ -250,7 +270,7 @@
                     return $tms;
                 }
             }
-            return $this->get_lbound_ms(); 
+            return $this->get_rbound_ms(); // full reload suggest
         }
         public function VoidLeft(string $unit = 's'): float {
             if (0 == count($this->candle_map)) return parent::VoidLeft();
@@ -392,16 +412,26 @@
                 Все потенциально неправильные дни будут добавлены в расписание, из которого при каждом запуске выбирается столько, сколько успеется. 
             */
             $schedule = $mysqli->select_map('date, target_volume', 'download_schedule', 
-                                            "WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (target_volume > 0) ORDER BY date DESC");
-            if (0 == count($schedule))
+                                            "WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (target_volume > 0) ORDER BY date DESC LIMIT {$this->max_blocks}");
+            $count = count($schedule);
+            if (0 == $count)
                 $this->ScanIncomplete($start, $end);
             else {
-                foreach ($schedule as $date => $tv) {
-                    if (count($this->blocks) >= $this->max_blocks) break;
-                    $this->DayBlock($date, $tv);
-                }
-                log_cmsg("~C97#INIT_BLOCKS:~C00 selected from schedule %d / %d blocks ", count($this->blocks), count($schedule));
+                foreach ($schedule as $date => $tv)                     
+                    $this->DayBlock($date, $tv);                              
+                krsort($this->blocks_map); // oldest block will download at least
+                if (0 == $this->BlocksCount())
+                    throw new ErrorException(format_color("~C31#ERROR:~C00 no blocks added for %s from %d", $this->ticker, $count));
+
+                $k_first = array_key_first($this->blocks); 
+                $k_last = array_key_last($this->blocks);
+                $last = $this->blocks[$k_first]->key;
+                $first = $this->blocks[$k_last]->key;
+                log_cmsg("~C97#INIT_BLOCKS:~C00 selected from schedule %d / %d blocks, from %s to %s ", 
+                            count($this->blocks), count($schedule), $first, $last);
             }
+            
+
 
         }
 
@@ -481,7 +511,8 @@ RESTART:
                             
             $full = $incomplete = 0;
             $sieved = $this->BlocksCount();                
-            krsort($control_map);  // последними должны быть в списке - новейшие блоки (2025+), поэтому сканирование списка нужно проводить начиная с последних.
+            // стратегия поменялась: теперь загрузка с самого начала, до победного конца. Чтобы в БД все ложилось последовательно и доступ был оптимальный. Так собирать сложные свечи будет быстрее
+            ksort($control_map);  
             $first_day = array_key_first($control_map);
 
             foreach ($control_map as $day => $cstat) {                    
@@ -584,7 +615,7 @@ RESTART:
             } // foreach control_map - main scan loop
 
             log_cmsg("~C93#DBG:~C00 unchecked days %d", count($unchecked));
-            krsort($unchecked);
+            ksort($unchecked);
             foreach ($unchecked as $day => $meta) {
                 // if (count($rescan) >= $this->max_blocks) break;
                 log_cmsg("~C33#VOID_BLOCK_ADD({$this->ticker}):~C00 schedudled %s with target volume %s", $day, $meta->volume);
@@ -732,11 +763,14 @@ RESTART:
             $diff = $block->target_volume - $check_volume;                 
             $diff_pp = 100 * $diff / max($block->target_volume, $check_volume, 0.01);
             $whole_load = false;
+            $recv = 0;
             if ($this->reconstruct_candles && $block->index >= 0 && $block->target_volume > $block->minutes_volume)
-                $this->RecoveryCandles($block, true);  // recovery absent minute candles
+                $recv = $this->RecoveryCandles($block, true);  // recovery absent minute candles
 
-            // для тиков целевой объем должен быть меньше или равен набранному, плюс минус погрешность-толерантность 
-            if (abs($diff_pp) < $this->volume_tolerance && $diff >= 0) {
+            // для тиков целевой объем должен быть меньше или равен набранному, плюс минус погрешность-толерантность
+            // исключение: удалось произвести апгрейд свечей 
+            $inaccuracy = 0.01; // погрешность суммирования float с очень разным порядком 0.01%
+            if (abs($diff_pp) < $this->volume_tolerance && ($recv > 0 || $diff_pp - $inaccuracy >= 0)) {
                 $whole_load = true;
                 log_cmsg("$prefix($symbol/$index):~C00 %s, lag left %5d, %s,\n\t\ttarget_volume reached %s in %d ticks, block summary %s, filled in session: %s ", 
                             strval($block), $lag_left, $block->info, format_qty($check_volume), $count, json_encode($check), $filled);    
@@ -744,26 +778,33 @@ RESTART:
                      $this->RecoveryCandles($block);  // upgrade latest
                 
             } elseif ($block instanceof TicksCache) {
-                log_cmsg("~C04{$prefix}_WARN($symbol/$index):~C00 %s, lag left %d, %s, target_volume reached %s (saldo %s) instead %s (diff %.1f%%),\n\t\t $s_info block summary %s, filled in session: %s ", 
+                $problem = $diff > 0 ? 'PARTIAL' : 'EXCESS';
+                if (0 == $check_volume)
+                    $problem = 'VOID';
+
+                log_cmsg("~C04{$prefix}_$problem($symbol/$index):~C00 %s, lag left %d, %s, target_volume reached %s (saldo %s) instead %s (diff %.2f%%),\n\t\t $s_info block summary %s, filled in session: %s ", 
                             strval($block), $lag_left, $block->info, 
                                 format_qty($check_volume), format_qty($saldo_volume),
-                                format_qty($block->target_volume), $diff_pp, json_encode($check), $filled);    
-                
+                                format_qty($block->target_volume), $diff_pp, json_encode($check), $filled);                    
                 $fk = [];
                 $uk = [];
                 $vk = [];
-                                    
-                foreach ($block->unfilled_vol as $mk => $v) {
-                    if ($v > 0) 
-                        $uk [$mk]= $v;
-                    else    
-                        $fk [$mk]= $v;  
+                $saldo_uf = 0;                                   
+                
+                foreach ($block->candle_map as $mk => $cr) {
+                    $rf = $block->refilled_vol[$mk] ?? 0;
+                    if (isset($block->unfilled_vol[$mk])) {
+                        $v = $block->unfilled_vol[$mk];
+                        $uk [$mk]= format_qty($v);
+                        $saldo_uf += $v;
+                    }
+                    elseif ($rf > 0)
+                        $fk [$mk]= format_qty($rf);  
                 }                    
 
-                if (count($uk) > 0) {
+                if (count($uk) > 0 && $diff > 0) {
                     foreach ($block->candle_map as $mk => $cr)
-                        $vk [$mk]= $cr[CANDLE_VOLUME];                                         
-                    $saldo_uf = array_sum($uk);
+                        $vk [$mk]= $cr[CANDLE_VOLUME];                                                             
                     log_cmsg(" ~C94#FILLED_DUMP: ~C00 F: %s \n U: %s = %s \n CM: %s",
                                     json_encode($fk), format_qty($saldo_uf), json_encode($uk), json_encode($vk));                                
                 }
@@ -855,6 +896,8 @@ RESTART:
             $candles_table = str_replace('ticks', 'candles', $this->table_name);
             $source = $block->Export();            
             $m_start = floor(time_ms() / 60000) * 60000;            
+            $updated = 0;
+
             if (-1 == $block->index) {
                 $latest = [];
                 foreach ($source as $tick) 
@@ -864,20 +907,22 @@ RESTART:
                 if (count($c_map) > 0) {              
                     [$o, $c, $h, $l, $v] = $c_map[0];    
                     $ts = date_ms(SQL_TIMESTAMP, $m_start);
-                    $query = "UPDATE TABLE $candles_table SET `close` = $c, `volume` = $v  WHERE `ts` = '$ts' ";
-                    $mysqli->try_query($query);  
-                    $mysqli_df->try_query($query);    
+                    $set = "`close` = $c, `volume` = $v  WHERE `ts` = '$ts' ";                    
+                    $um = $mysqli->try_query("UPDATE $candles_table SET $set");  
+                    $uc = $mysqli_df->try_query("ALTER TABLE $candles_table UPDATE $set");                        
+                    log_cmsg("~C92#LAST_CANDLE_UPGRADE:~C00 %s: MySQL %s, ClickHouse %s", $candles_table, b2s($um), b2s($uc));
+                    $updated = 1;
                 }
             }
             
-            if (!$reconstruct) return;
+            if (!$reconstruct) return $updated;
+            $t_start = pr_time();
             $source = $block->Export();
             $c_map = $this->ReconstructCandles($source);
             $start_ts = date_ms(SQL_TIMESTAMP, $start);
             $end_ts = date_ms(SQL_TIMESTAMP, $end);
             $exists = $mysqli->select_map('ts,volume', $candles_table, "WHERE ts >= '$start_ts' AND ts <= '$end_ts'");
-            $rows = [];
-            $updated = 0;
+            $rows = [];            
             $info = "EXISTS {$block->key}: ". print_r($exists, true);
             $info .= "UPGRADE: ".print_r($c_map, true);
             $mgr = $this->get_manager();
@@ -886,24 +931,34 @@ RESTART:
             foreach ($c_map as $tk => $rec) {
                 $ts = format_ts($tk);
                 [$o, $c, $h, $l, $v] = $rec;
+                if (isset($exists[$ts])) $updated ++;
+                /*
                 if (isset($exists[$ts])) {
-                    $query = "UPDATE TABLE $candles_table SET `open` = $o, `close` = $c, `high` = $h, `low` = $l, `volume` = $v WHERE `ts` = '$ts'";
-                    if ($exists[$ts] < $v && $mysqli_df->try_query($query))
+                    $set = "`open` = $o, `close` = $c, `high` = $h, `low` = $l, `volume` = $v WHERE `ts` = '$ts'";
+                    if ($exists[$ts] < $v && 
+                        $mysqli->try_query("UPDATE $candles_table SET $set") &&
+                        $mysqli_df->try_query("ALTER TABLE $candles_table UPDATE $set"))
                         $updated ++;
                 }
-                else    
-                    $rows []= "('$ts', $o, $c, $h, $l, $v)"; // insert lost candle
+                else  //*/
+                $rows []= "('$ts', $o, $c, $h, $l, $v)"; // insert/update lost candle
             }
+            
             if (count($rows) > 0) {
-                $query = "INTO $candles_table (`ts`, `open`, `close`, `high`, `low`,`volume`) VALUES ";
+                $query = "INSERT INTO $candles_table (`ts`, `open`, `close`, `high`, `low`,`volume`) VALUES ";
                 $query .= implode(",\n", $rows);                
-                $res_m = $mysqli->try_query("INSERT IGNORE $query") ? 'success' : '~C91failed';
-                $res_c = $mysqli_df->try_query("INSERT $query") ? 'success' : '~C91failed';
-                log_cmsg("~C92#RECOVERY_CANDLES:~C00 %d missed candles inserted into %s, for MySQL %s, ClickHouse %s", 
-                            count($rows), $candles_table, $res_m, $res_c);
+                $res_c = $mysqli_df->try_query($query); // always overwrite existed candles via ReplacingMergeTree
+                $query .= "\n ON DUPLICATE KEY UPDATE `open` = VALUES(`open`), `close` = VALUES(`close`), `high` = VALUES(`high`), `low` = VALUES(`low`), `volume` = VALUES(`volume`)";
+                $res_m = $mysqli->try_query($query);         
+                $elps = pr_time() - $t_start;           
+                $inserted = count($rows) - $updated;
+                if ($inserted > 0)
+                    log_cmsg("~C92#RECOVERY_CANDLES:~C00 %d missed candles inserted, %d updated in %s, for MySQL %s, ClickHouse %s, time %.1f sec", 
+                                $inserted, $updated, $candles_table, b2s($res_m), b2s($res_c), $elps);
+                else
+                    log_cmsg("~C92#RECOVERY_CANDLES:~C00 %d candles updated in %s", $updated, $candles_table);                                            
             }
-            if ($updated > 0) 
-                log_cmsg("~C92#RECOVERY_CANDLES:~C00 %d candles updated in %s", $updated, $candles_table);            
+            return $updated;
         }
 
 
