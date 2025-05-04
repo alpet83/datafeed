@@ -323,11 +323,11 @@
 
 
 
-        public function CorrectTable (){
+        public function CorrectTables (){
             global $mysqli_df;
             // $mysqli_df->try_query("ALTER TABLE {$this->table_name} MODIFY ORDER BY trade_no");
             $table_name = $this->table_name;
-            parent::CorrectTable();
+            parent::CorrectTables();
             $code = $this->table_create_code_ch;
             if (!is_string($code) || !str_in($code, 'CREATE')) {
                 log_cmsg("~C91#WARN(CorrectTable):~C00 not set create code for %s", $table_name);
@@ -342,6 +342,7 @@
             }                
             $mysqli_df->try_query("ALTER TABLE $table_name ADD INDEX IF NOT EXISTS ts ts TYPE set(0)  GRANULARITY 16;");
             $mysqli_df->try_query("ALTER TABLE $table_name MATERIALIZE INDEX ts");
+            $this->table_corrected = true;
             // $mysqli_df->try_query("ALTER TABLE $table_name ADD INDEX IF NOT EXISTS date DATE(ts) TYPE minmax  GRANULARITY 2");
         }    
 

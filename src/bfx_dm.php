@@ -1,8 +1,5 @@
-<?php
-
-use Dom\Element;
+<?php    
     require_once "proto_manager.php";
-
 
     const DB_NAME = 'bitfinex';
     const HISTORY_MIN_TS = '2015-01-01 00:00:00'; // minimal history start for initial download
@@ -103,22 +100,27 @@ use Dom\Element;
         } // function ImportDataWS
 
         
-        protected function on_ws_event(string $event, mixed $data) {
-            if ('subscribed' == $event) {
-                $id = $data->chanId;
-                if (isset($data->key))
-                    $this->subs_map[$id] = str_replace($this->ws_data_kind.':', '', $data->key);  // for candles
-                elseif (isset($data->symbol)) 
-                    $this->subs_map[$id] = $data->symbol; // for trades and ticker
+        protected function on_subscribe(int $id, string $key) {            
+            $sub_prefix = "{$this->ws_data_kind}:";
+            $this->subs_map[$id] = str_replace($sub_prefix, '', $key);  // for candles            
+            $sym = $this->subs_map[$id];
+            $loader = $this->GetLoader($sym);        
+            if (is_object($loader)) {
+                $loader->ws_sub = true;
+                unset($this->ws_sub_started[$loader->pair_id]);
+                log_cmsg("~C97 #WS_SUBCRIBE:~C00 confirmed for %s @ #%d \n", $sym, $id);
+            }
+            else    
+                log_cmsg("~C31 #WS_SUBCRIBE_UNKNOWN:~C00 confirmed for %s @ #%d \n", $sym, $id);
+        }
 
-                $sym = $this->subs_map[$id];
-                $loader = $this->GetLoader($sym);        
-                if (is_object($loader)) {
-                    $loader->ws_sub = true;
-                    log_cmsg("~C97 #WS_SUBCRIBE:~C00 confirmed for %s @ #%d \n", $sym, $id);
-                }
-                else    
-                    log_cmsg("~C31 #WS_SUBCRIBE_UNKNOWN:~C00 confirmed for %s @ #%d \n", $sym, $id);
+        protected function on_ws_event(string $event, mixed $data) {
+            
+            $id = $data->chanId ?? 0;
+            $key =  isset($data->key) ? $data->key : $data->symbol ?? '???'; // for trades and ticker
+
+            if ('subscribed' == $event) {                
+                $this->on_subscribe($id, $key);                            
             } // on subscribe            
             elseif ('info' == $event && isset($data->platform)) {
                 log_cmsg("~C97 #WS_CONNECT~C00: %s", print_r($event, true));
@@ -130,6 +132,15 @@ use Dom\Element;
                 }
                 else
                     log_cmsg("~C31 #WS_PROBLEM:~C00 platform status %d", $data->platform->status);
+            }
+            elseif ('pong' == $event) {
+                // all good!
+            }
+            elseif ('error' == $event) {
+                if (10301 === $data->code)                     
+                    $this->on_subscribe($id, $key);                                             
+                else
+                    log_cmsg("~C31 #WS_ERROR:~C00 %s", print_r($data, true));
             }
             else
                 log_cmsg("~C94 #WS_EVENT:~C00 %s: %s", $event, print_r($data, true));

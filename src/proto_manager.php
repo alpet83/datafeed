@@ -24,7 +24,7 @@
                 $elps = time_us() - $start; // ms to us                
                 if ($elps >= $us) break;
                 $info = [];                
-                pcntl_sigtimedwait([SIGQUIT, SIGTERM], $info, 0, $ns_wait);  // real delay                              
+                pcntl_sigtimedwait([SIGQUIT, SIGUSR1, SIGKILL, SIGTERM], $info, 0, $ns_wait);  // real delay                              
             }      
             if ($elps < $us)
                 usleep($us - $elps);
@@ -101,6 +101,8 @@
 
         protected   $ws_active = false;
         protected   $ws_imports  = 0;
+
+        protected   $ws_empty_reads = 0;
         protected   $ws_events_cnt = 0;           // simple counter
         protected   $ws_reconnects = 0;
         protected   $ws_recv_bytes = 0;           // bytes counter 
@@ -115,8 +117,7 @@
         protected   $ws_sub_started = [];  // map [pair_id] = timestamp, for timeout control
 
         protected   $loader_class = 'BadLoaderException';
-        
-        protected   $last_ping = 0;
+               
 
         protected   array $ticker_list   = [];
         protected   $tables = ['activity' => 'src_activity'];
@@ -125,7 +126,7 @@
         public      $db_tables_clickhouse = []; // all tables
 
 
-        protected   $last_db_reconnect = 0;       
+        public      $last_db_reconnect = 0;       
 
         public      $alive_t = 0;
         protected   $create_t = 0;
@@ -357,8 +358,12 @@
                 $this->CreateWebsocket();  // switch RTM download
             }            
             
-            $ws_lag = time() - $this->last_ping;            
+            $ws_lag = 0;            
             $ws_elps = time() - $this->ws_recv_last;
+            if (is_object($this->ws)) {
+                $ws_lag = time() - $this->ws->last_ping;            
+                
+            }
             $ots_map = [];
             $keys = [];
             $minute = date('i') * 1 + date('s') / 60;
@@ -430,10 +435,12 @@
                 return false;
             }      
 
-            $unread = 1;  
+            $unread = 1; // $this->ws->unreaded();  
+          
             $readed = 0;     
-            while ($unread > 0 && $this->ws) { 
+            while ($unread > 0) { 
                 $readed += $this->LoadPacketWS(); 
+                if (!is_object($this->ws)) break; // connection lost
                 $unread = $this->ws->unreaded();                
             }  // while unread
             return $readed;
@@ -442,7 +449,7 @@
 
         protected function LoadPacketWS(): int {  
             $trecv = 0;                   
-            if (!$this->ws) return 0;
+            if (!is_object($this->ws)) return 0;
 
             $uptime = time() - $this->create_t;
 
@@ -451,30 +458,36 @@
                     $trecv = max ($trecv, $loader->ws_time_last);
                 
             $elps = time() - $trecv;
+            $ws = $this->ws;        
+            $ping_elps = time() - $ws->last_ping;            
 
 
             if ($trecv > 0 && $elps > 300) {         
                 if ($elps > SECONDS_PER_DAY)
                     $elps = '~C31never~C00';
 
-                $this->ReconnectWS("last recieve age $elps ".color_ts($trecv));
-                return 0;
-            }
+                if ($ping_elps > 120)
+                    $this->ReconnectWS("last recieve age $elps ".color_ts($trecv));
+                else {   
+                    log_cmsg("~C31#WARN_WS_DATA_LAG:~C00 last data age %d, ping elps %d sec. Need re-subscribe", $elps, $ping_elps);
+                    foreach ($this->GetRTMLoaders() as $loader) 
+                        $loader->ws_sub = false;                                        
 
-            $ws = $this->ws;        
+                }                
+            }
+            
             try {            
                 $avail = $ws->unreaded();
-                if ($avail > 2000)
-                    log_cmsg("~C96#PERF_WS:~C00 avail for read %d bytes", $avail);
-
                 $t_start = pr_time();
                 $recv = $ws->receive();
+                $opcode = $ws->getLastOpcode();
                 $elps = pr_time() - $t_start;
                 if ($elps > 3) 
                     log_cmsg("~C31 #PERF_WARN(LoadPacketWS):~C00 elapsed time for receive = %.3f sec", $elps);                
 
-                if (null == $recv || strlen($recv) < 4) return 0;                
+                if (null == $recv || strlen($recv) < 1) return 0;                
 
+                $this->ws_empty_reads = 0;
                 $this->ws_recv_packets ++;
                 $this->ws_recv_last = pr_time();
                 $this->ws_recv_bytes += strlen($recv);
@@ -510,8 +523,24 @@
                     if ($uptime < 180)
                         log_cmsg("~C94 #WS_PONG:~C00 connection still alive");
                 }
+                elseif ('ping' == $opcode) {
+                    $ws->last_ping = time(); 
+                    // log_cmsg("~C94 #WS_PING_RX:~C00 payload %s", $recv);
+                    $rec = json_decode("{\"payload\":\"$recv\"}", false);
+                    $this->on_ws_event('ping', $rec);
+                }
+                elseif ('pong' == $opcode) {
+                    $ws->last_ping = time();
+                    $rec = json_decode("{\"payload\":\"$recv\"}", false);
+                    $this->on_ws_event('pong', $rec);
+                }
+                elseif ('close' == $opcode) {
+                    log_cmsg("~C31 #WS_CLOSE_WARN:~C00 reason %s", $recv);                    
+                    $this->ws_active = false;
+                    $this->ws = null;
+                }
                 else    
-                    log_cmsg("~C91 #WS_WARN:~C00 unknown kind of data %s", $recv);                   
+                    log_cmsg("~C91 #WS_WARN(LoadPacketWS):~C00 unknown kind of data %s:%s", $opcode, $recv);                   
 
                 
             } catch (Exception $E) {       
@@ -519,9 +548,12 @@
                 $this->ws_stats ['exceptions'] = ($this->ws_stats ['exceptions'] ?? 1) + 1; 
                 file_add_contents("{$this->tmp_dir}/ws_exception.log", $msg);
                 if (!str_in($msg, 'Empty read') && !str_in($msg, 'Broken frame'))
-                    log_cmsg("~C91 #EXCEPTION(LoadPacketWS):~C00 %s", $msg);                
-                if (false !== strpos($msg, 'connection dead') && $elps > 30) {          
-                    $this->ReconnectWS('receive failed');
+                    log_cmsg("~C91 #EXCEPTION(LoadPacketWS):~C00 %s", $msg);              
+                else
+                    $this->ws_empty_reads ++;
+                    
+                if ($this->ws_empty_reads > 4 && $ping_elps > 120) {          
+                    $this->ReconnectWS("receive fails too much: $msg");
                 } // reconnect typical 
             } // exception handle
             return 0;
@@ -531,37 +563,43 @@
         public function ProcessWS(bool $wait = true): int {                  
             $loads = 0;
             if (!is_object($this->ws)) return -1;
-
-            if ($this->ws) {
+            $ws = $this->ws;
+            if ($ws->isConnected()) {
                 $now = time();
-                $uptime = $now - $this->create_t;
-                $elps = $now - $this->last_ping;
-                if ($elps > 30 || $wait) 
+                $uptime = $now - $this->create_t;                
+                $last_ping = $ws->last_ping;
+                $elps = $now - $last_ping;
+                if ($elps > 30) 
                     try {
                         if ($uptime < 180)
-                            log_cmsg("~C94 #WS_PING:~C00 previus ping elapsed time %d sec", $elps);
-                        $this->ws->send('ping');
-                        $this->last_ping = $now;
-                        $wait = true; // must read ping response
+                            log_cmsg("~C94 #WS_PING_LATE:~C00 previus ping elapsed time %d sec, unreaded %d bytes", $elps, $ws->unreaded());
+                        $ws->ping();                        
+                        if ($elps >= 60) $wait = true;
                     } catch (Throwable $E) {
-                        log_cmsg("~C31 #EXCEPTION:~C00 while trying ping WebSocket: %s", $E->getMessage());
-                        $this->last_ping = $now;
+                        log_cmsg("~C31 #EXCEPTION:~C00 while trying ping WebSocket: %s", $E->getMessage());                        
                         $this->ws_stats ['exceptions'] = ($this->ws_stats ['exceptions'] ?? 1) + 1; 
                         if ($elps >= 60 || $this->ws_stats ['exceptions'] > 5)  {
                             $this->ReconnectWS('ping failed / connection lost');
                             $this->ws_stats ['exceptions'] = 0;
                         }
                     }                 
-            }     
-            
+            }                 
+            else
+                return -2;
 
-            if (!$wait && 0 == $this->ws->unreaded()) 
+
+            $unreaded  = $this->ws->unreaded();
+            if (!$wait && 0 == $unreaded) 
                 return 0;
-            
+
+            if ($unreaded > 2000)
+                log_cmsg("~C96#PERF(LoadWS):~C00 avail for read %d bytes", $unreaded);
+
             $t_start = pr_time();    
             if ($this->LoadWS()) 
                 $loads ++;                        
             $elps = pr_time() - $t_start;
+
             if ($elps > 5) {
                 $wait = $wait ? 'wait' : 'no wait';
                 log_cmsg("~C31 #PERF_WARN_WS:~C00 elapsed time for LoadWS = %.3f sec with $wait ", $elps);
@@ -586,7 +624,7 @@
             return (sqli()->active_db() == $this->db_name) ? $suffix : "{$this->db_name}.$suffix";
         }
 
-        abstract protected function on_ws_event(string $event, object $data);
+        abstract protected function on_ws_event(string $event, mixed $data);
 
         public function Uptime() {
             return time() - $this->create_t;

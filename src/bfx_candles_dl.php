@@ -67,6 +67,8 @@
                 log_cmsg("~C91 #WARN:~C00 decode failed for json data, type = %s? ", gettype($data));
                 return null;
             }
+            if (!$this->table_corrected) 
+                $this->CorrectTables();
 
             if ($this->manager->VerifyRow($data)) {
                 log_cmsg("~C91 #STRANGE:~C00 directly single row %s passed from %s: %s ", json_encode($data), $source, format_backtrace());                
@@ -86,8 +88,6 @@
             $updated = 0;            
             $row = [];
             $errs = [];
-            $block = $this->last_block;
-
 
             foreach ($data as $row) {
                 if (isset($row[0]) && is_int($row[0])) 
@@ -121,30 +121,9 @@
                 $direct_sync = true;
             }
 
-            
-            $last_t = $result->lastKey();
-            $latest = $this->last_block->max_avail;
-
-            $data_elps = time() - $last_t;
-            $target = $direct_sync ? $this->table_name : 'cache';
-
-            if (count($result) > 0 && $direct_sync) {
-                $result->Store($block);                
-                $this->ws_data_last = max($this->ws_data_last, $last_t);
-                // ругаться можно если это обновление последнее, и оно отстает от имеющихся данных в целом                
-                if ($data_elps > 100 && $last_t == $this->ws_data_last && $last_t < $latest) 
-                    log_cmsg("~C31 #WS_DATA_LAG:~C00 %4u seconds elapsed last data for %s: %s from source %s vs last loaded %s ", 
-                                $data_elps, $this->symbol, color_ts($last_t), $source, color_ts($latest));
-                $cnt = $this->SaveToDB($result, false);           
-            }                        
-            if ($cnt + $updated > 0 && $verbose >= 3 && $data_elps < 100)
-                log_cmsg("... into %s $target inserted %d, updated %d, from %d rows, total %.2fK candles, last = %s, from %s",
-                            $this->ticker, $cnt, $updated, $checked, count($result) / 1000.0,  color_ts($last_t), $source);
-
+            $this->ProcessImport($result, $direct_sync, $source, $updated, count($data));          
             return $result;
-        }             
-     
-         // ImportCandles         
+        }  // function ImportCandles         
 
         public function LoadCandles(DataBlock $block, string $ts_from, bool $backward_scan = true, int $limit = 5 * 24 * 60): ?array {
             $url = $this->rest_api_url;              
@@ -238,34 +217,8 @@
         } // constructor       
 
         protected function SelfCheck(): bool {
-            global $mysqli_df, $mysqli;
-            $mysqli_df = $mysqli = sqli();
-            $replica = is_object($mysqli) ? $mysqli->replica : null;
-            $elps = time() - $this->last_db_reconnect;
-
-            if (!$mysqli || !$mysqli->ping()) {
-                log_cmsg("~C91 #FAILED:~C00 connection to DB is lost, trying reconnect...");
-                $mysqli_df = $mysqli = init_remote_db(DB_NAME);                
-                $this->last_db_reconnect = time();
-                if (!$mysqli_df) {
-                    sleep(30);
-                    return false;
-                }                
-            }    
-
-            if (!is_object($replica) || !$replica->ping()) {                
-                if ($elps > 60) {  // not to frequent                    
-                    log_cmsg("~C31 #WARN:~C00 replication DB connection is lost, trying reconnect...");
-                    $replica = init_replica_db(DB_NAME);
-                    $this->last_db_reconnect = time();
-                }
-                else    
-                    $replica = null;
-            }
-            $mysqli->replica = is_object($replica) ? $replica : null;   
-            return true;
+            return DBCheckReconnect($this);
         }
-
                
         protected function Loader(int $index): ?BitfinexCandleDownloader {
             return $this->loaders[$index];
@@ -283,11 +236,11 @@
                     continue;
                 }                
                 if (is_object($ws) && $ws instanceof BitfinexClient) {
-                    $key = "{$this->ws_data_kind}:{$downloader->symbol}";
-                    $params = ['key' => $key];                                    
+                    $key = "{$this->ws_data_kind}:{$downloader->symbol}";                     
+                    $params = ['channel' => 'candles','key' => $key];                                    
                     log_cmsg("~C97 #WS_SUB_ADD~C00: symbol = %s", $downloader->symbol);    
                     $added ++;
-                    $ws->subscribe('candles', $params);
+                    $ws->subscribe($params);
                 }
             }
             if ($added > 0) 
@@ -302,53 +255,9 @@
 
 
     $ts_start = pr_time();
-    echo ".";
-
-    date_default_timezone_set('UTC');
-    set_time_limit(15);    
-    
-    $db_name_active = 'nope'; 
-    $symbol = 'all';
-
-    if ($argc && isset($argv[1])) {
-      $symbol = $argv[1];
-      if (isset($argv[2]))
-          $verbose = $argv[2];
-    }  
-    else
-      $symbol = rqs_param("symbol", 'all');         
-
-    $pid_file = sprintf($tmp_dir.'/candles_dl@%s.pid', $symbol);
-    $pid_fd = setup_pid_file($pid_file, 300);        
-    $hour = date('H');
-    $log_name = sprintf('/logs/bfx_candles_dl@%s-%d.log', $symbol, $hour); // 24 logs rotation
-    $log_file = fopen(__DIR__.$log_name, 'w');
-    flock($log_file, LOCK_EX);
-    echo ".\n";
-    log_cmsg("~C97 #START:~C00 trying connect to DB %s...", DB_NAME);
-
-    $mysqli_df = $mysqli = init_remote_db(DB_NAME);
-    if (!$mysqli) {
-        log_cmsg("~C91 #FATAL:~C00 cannot initialze DB interface! ");
-        die("ooops...\n");
-    }   
-
-    $chdb = false;
-    $pid = shell_exec('pidof clickhouse-server');
-    if (strlen($pid) > 1 && is_integer($pid) || !str_in(CLICKHOUSE_HOST, '127.0.0.1'))
-        $chdb = ClickHouseConnect(CLICKHOUSE_USER, CLICKHOUSE_PASS, DB_NAME);
-
-    $mysqli->try_query("SET time_zone = '+0:00'");
-    $mysqli->replica = init_replica_db(DB_NAME);
-    log_cmsg("~C93 #START:~C00 connected to~C92 localhost@$db_name_active~C00 MySQL, ClickHouse [$pid] = ".is_object($chdb)); 
-    $elps = -1;  
+    $hour = gmdate('H');
     $hstart = floor(time() / 3600) * 3600;
-    $manager = new CandleDownloadManager($symbol);
-    main($manager);    
-    fclose($log_file);
-    flock($pid_fd, LOCK_UN);
-    fclose($pid_fd);  
-    system("bzip2 -f --best $log_name");
-    $log_file = false;
-    unlink($pid_file);
+    echo ".";
+    $manager = null;
+    RunConsoleSession('bfx');
 ?>

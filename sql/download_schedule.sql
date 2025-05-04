@@ -4,5 +4,6 @@ CREATE TABLE IF NOT EXISTS `download_schedule` (
     `ticker` varchar(20) NOT NULL,
     `target_volume` float NOT NULL,
     `target_close` float NOT NULL,
+    `target_count` INT UNSIGNED  NOT NULL DEFAULT '0',
     PRIMARY KEY (`date`,`kind`,`ticker`) USING BTREE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

@@ -14,7 +14,8 @@
     const CANDLE_HIGH = 2;
     const CANDLE_LOW = 3;
     const CANDLE_VOLUME = 4;     
-    const CANDLE_FLAGS = 5;
+    const CANDLE_FLAGS = 5;  // for intraday
+    const CANDLE_TRADES = 5; // for daily candles
 
     enum BLOCK_CODE: int {
         case INVALID = -1;

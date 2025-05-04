@@ -199,16 +199,16 @@
             $keys =  array_keys($this->loaders);
             foreach ($keys as $n_loader) {        
                 $downloader = $this->Loader ($n_loader);                                    
-                $params = ['symbol' => $downloader->symbol];
+                $params = ['channel' => 'trades', 'symbol' => $downloader->symbol];
                 log_cmsg("~C97 #WS_SUB~C00: symbol = %s", $downloader->symbol);
                 if ($this->ws instanceof BitfinexClient)
-                    $this->ws->subscribe('trades', $params);
+                    $this->ws->subscribe( $params);
             }
         } // function SubscribeWS
 
         public function VerifyRow(mixed $row): bool {
-            return (is_array($row) && 4 == count($row) && 
-                        is_int($row[IDX_MTS]) && is_numeric($row[IDX_PRICE]) && is_numeric($row[IDX_AMOUNT]));
+            return  is_array($row) && 4 == count($row) && 
+                        is_int($row[IDX_MTS]) && is_numeric($row[IDX_PRICE]) && is_numeric($row[IDX_AMOUNT]);
         }
     }
 

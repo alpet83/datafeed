@@ -52,8 +52,10 @@
         protected   $load_method = '';  // REST loader for kind of data
         protected   string $data_name;  // for tables naming and logging
 
-        protected   $table_create_code = ''; // for MySQL loaded by CorrectTable 
-        protected   $table_create_code_ch = ''; // for ClickHouse loaded by CorrectTable
+        protected   $table_create_code = ''; // for MySQL loaded by CorrectTables
+        protected   $table_create_code_ch = ''; // for ClickHouse loaded by CorrectTables
+
+        protected   $table_corrected = false;
         protected   $table_engine = '';
         protected   $table_info = null;        // record describes stats for table bigdata (start_part, end_part, min_time, max_time, size)
         protected   $table_need_recovery = false;
@@ -80,6 +82,8 @@
         protected  $volume_tolerance = 0.01;  // in % for block completion
 
         protected  $partitioned = true;
+
+        protected  $zero_scans = 0;
 
 
         public function __construct(DownloadManager $mngr, \stdClass $ti) {
@@ -236,7 +240,7 @@ SKIP_DOWNLOAD:
             return 0 == $this->BlocksCount() && $this->loaded_blocks > 0 && $data_ok;
         }                
 
-        protected function CorrectTable() {
+        protected function CorrectTables() {
             global $mysqli, $mysqli_df, $chdb, $db_error;            
             $valid_engine = 'ReplacingMergeTree';
             
@@ -299,7 +303,7 @@ SKIP_DOWNLOAD:
                 
                 
             } catch (Throwable $e) {
-                log_cmsg("~C91#EXCEPTION(CorrectTable):~C00 %s, from: %s", $e->getMessage(), $e->getTraceAsString());
+                log_cmsg("~C91#EXCEPTION(CorrectTabless):~C00 %s, from: %s", $e->getMessage(), $e->getTraceAsString());
                 return;                
             }                                              
 
@@ -1005,8 +1009,8 @@ SKIP_CHECKS:
         public function PrepareDownload() {
             
             $limit_past = strtotime(HISTORY_MIN_TS);
-            if (!$this->initialized)
-                $this->CorrectTable();
+            if (!$this->table_corrected)
+                $this->CorrectTables();
 
             $this->QueryTimeRange();
             
@@ -1056,10 +1060,10 @@ SKIP_CHECKS:
                 $end_tss = gmdate(SQL_TIMESTAMP, $end);
                 log_cmsg("~C97#MAPPING:~C00 performed for %s, produced %d blocks, from %s to %s", $this->ticker, $n_blocks, $start_tss, $end_tss);
             }            
-            else
+            else {
                $this->head_loaded = true;
-
-            $this->nothing_to_download = 0 == $n_blocks;
+               $this->nothing_to_download = $this->zero_scans > 0;
+            }
 
             $last = $this->db_last(false, 3); // in seconds
             if (0 == $this->newest_ms && $last !== null) 
@@ -1076,7 +1080,7 @@ SKIP_CHECKS:
             $mgr = $this->get_manager();
             $minute = date('i');            
             if (0 == $n_blocks) {                
-                if (0 == $this->loaded_blocks && $mgr->cycles < 30 && $load_history)
+                if (0 == $this->loaded_blocks && $mgr->cycles < 30 && $load_history && !$this->loaded_full())
                     log_cmsg("~C34#REST_DOWNLOAD:~C00 too small blocks to download for %s, head loaded = %s; scaning...", $this->ticker, $this->head_loaded ? 'yep' : '~C31nope');                    
                 $this->PrepareDownload();
                 $n_blocks = count($this->blocks);                             

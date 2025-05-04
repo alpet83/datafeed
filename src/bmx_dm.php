@@ -5,9 +5,6 @@
     
     abstract class BitMEXDownloadManager 
         extends DownloadManager {       
-
-
-                
         
         public function __construct(string $symbol, string $data) {            
             global $tmp_dir;
@@ -54,6 +51,9 @@
                 }
                 // if (1 == $data->platform->status)     $this->SubscribeWS();
             } //*/
+            elseif ('pong' == $event) {
+                // all good!
+            }
             else
               log_cmsg("~C31#WS_EVENT_UNKNOWN:~C00 %s with data: %s", $event, var_export($data, true));
         } // function on_ws_event
