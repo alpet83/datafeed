@@ -248,8 +248,7 @@
             }
             $daily_table = "{$table_name}__1D";
             $code = $mysqli->show_create_table($daily_table);
-            $q_trades = "ALTER TABLE $daily_table ADD COLUMN `trades` INT UNSIGNED NOT NULL DEFAULT '0' AFTER `volume`";
-
+            $q_trades = "ALTER TABLE $daily_table ADD COLUMN IF NOT EXISTS `trades` INT UNSIGNED DEFAULT '0' AFTER `volume`";
             if (!str_in($code, 'trades'))                 
                 $mysqli->try_query($q_trades); // add trades column
             
