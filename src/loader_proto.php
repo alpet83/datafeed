@@ -6,6 +6,11 @@
 
     const DL_FLAG_HISTORY  = 0x01;
     const DL_FLAG_REALTIME = 0x02;
+    const DL_FLAG_REPAIRS  = 0x04;  // scan for repair
+    const DL_FLAG_REPLACE  = 0x08;  // allow remove data (cleanup block)
+
+    const DEBUGGING = true;
+
     const VERIFY_TS_DEFAULT = '2012-01-01 00:00';
 
     // offsets in cache row
@@ -184,15 +189,25 @@
                 $result &= $this->CreateTable($mysqli_df, $ch_proto, $this->table_name); 
             elseif ($chdb)                 
                 $result &= $this->CreateTable($chdb, $ch_proto, $this->table_name);             
-
-            $query = file_get_contents('download_schedule.sql'); // make scheduler table
-            $mysqli->try_query($query);
+           
+            $result &= $this->CreateTable($mysqli, 'download_schedule.sql', 'download_schedule');
+            $result &= $this->CreateTable($mysqli, 'download_history.sql', 'download_history');            
             $mysqli_df->try_query("COMMIT;\n");                            
             return $result;
         }
 
         public function CreateTable(mixed $conn, string $file_name, string $table_name): bool {
-            $search = '@TABLENAME';           
+            $search = '@TABLENAME';          
+            if (str_in($table_name, '1D__1D')) {
+                $query = "DROP TABLE IF EXISTS `$table_name`";
+                if ($conn instanceof mysqli_ex) 
+                    $conn->query($query);
+                elseif ($conn instanceof ClickHouseDB\Client)
+                    $conn->write($query);
+                log_cmsg("~C31 #ERROR:~C00 double suffix used for table %s, from: %s ", $table_name, format_backtrace());
+                return true;
+            }
+            
             if ($conn instanceof mysqli_ex) {
                 if ($conn->table_exists($table_name)) return true;
                 return $this->ProcessTemplate($conn, $file_name, $search, $table_name);
@@ -207,12 +222,12 @@
             return false;
         }
 
-        public function IsHistorical() {
-          return boolval($this->data_flags & DL_FLAG_HISTORY);
+        public function IsHistorical(): bool {
+          return ($this->data_flags & DL_FLAG_HISTORY) != 0;
         }
 
-        public function IsRealtime() {
-            return boolval($this->data_flags & DL_FLAG_REALTIME);
+        public function IsRealtime(): bool {
+            return ($this->data_flags & DL_FLAG_REALTIME) != 0;
         }
 
         abstract public function ImportWS(mixed $data, string $context): int;
@@ -244,7 +259,6 @@
                 log_cmsg("~C31#WARN:~C00 Connection is null, can't process template from %s", $file_name);
                 return false;
             }
-
             if (!file_exists($file_name))
                 throw new Exception("FATAL: not exists template file: $file_name");                
             

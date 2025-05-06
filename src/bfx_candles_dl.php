@@ -141,6 +141,8 @@
         }
 
         public function LoadDailyCandles(int $per_once = 1000, bool $from_DB = true): ?array { 
+
+
             $res = parent::LoadDailyCandles($per_once, $from_DB); // used for limiting
             // if (is_array($res) && count($res) > 0)  return $res;
             $this->SaveToDB($this->cache); // flush cache before filling            
@@ -151,19 +153,21 @@
                 $cursor = array_key_last($res);
                 $cursor -= SECONDS_PER_DAY * 7;                
             }            
-
             $json = 'fail';            
-            $table_name = "{$this->table_name}__1D";
 
             $orig_table = $this->table_name;
+            $orig_table = str_replace('__1D', '', $orig_table);
+            $table_name = "{$orig_table}__1D";
+
+            if (!$this->CreateTables())
+                throw new Exception("~C91#ERROR:~C00 failed create tables ");
+            
             $map = [];
             try {
                 $this->table_name = $table_name;
                 $candles = new CandlesCache($this); 
                 $candles->interval = $this->current_interval = SECONDS_PER_DAY;
-
-                if (!$this->CreateTables())
-                    throw new Exception("~C91#ERROR:~C00 failed create table %s", $this->table_name);
+                
                 log_cmsg("~C93 #LOAD_DAILY:~C00 requesting daily candles for %s from exchange", $this->symbol);
                 $attempts = 10;                
 

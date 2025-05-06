@@ -196,14 +196,24 @@
             return true;
         }
         protected function SubscribeWS() {
-            $keys =  array_keys($this->loaders);
-            foreach ($keys as $n_loader) {        
-                $downloader = $this->Loader ($n_loader);                                    
+            $keys =  array_keys($this->GetRTMLoaders());
+            $already = 0;
+            $added = 0;
+            foreach ($keys as $pair_id) {        
+                $downloader = $this->Loader ($pair_id);                                                     
+                if ($downloader->ws_sub) {
+                    $already ++;
+                    continue;
+                }
                 $params = ['channel' => 'trades', 'symbol' => $downloader->symbol];
-                log_cmsg("~C97 #WS_SUB~C00: symbol = %s", $downloader->symbol);
-                if ($this->ws instanceof BitfinexClient)
+                log_cmsg("~C97 #WS_SUB~C00: %s = %d", $downloader->symbol, $downloader->data_flags);
+                if ($this->ws instanceof BitfinexClient) {
                     $this->ws->subscribe( $params);
+                    $added ++;
+                }
             }
+            if ($added > 0)
+                log_cmsg("~C97 #WS_SUBSCRIBE:~C00 %d added, already %d confirmed", $added, $already);
         } // function SubscribeWS
 
         public function VerifyRow(mixed $row): bool {

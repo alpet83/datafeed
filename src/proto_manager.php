@@ -547,7 +547,7 @@
                 $msg = $E->getMessage();
                 $this->ws_stats ['exceptions'] = ($this->ws_stats ['exceptions'] ?? 1) + 1; 
                 file_add_contents("{$this->tmp_dir}/ws_exception.log", $msg);
-                if (!str_in($msg, 'Empty read') && !str_in($msg, 'Broken frame'))
+                if (!str_in($msg, 'Empty read') && !str_in($msg, 'Broken frame') && !str_in($msg, 'Bad opcode'))
                     log_cmsg("~C91 #EXCEPTION(LoadPacketWS):~C00 %s", $msg);              
                 else
                     $this->ws_empty_reads ++;

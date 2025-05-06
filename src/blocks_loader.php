@@ -7,6 +7,7 @@
 
     abstract class BlockDataDownloader 
              extends DataDownloader {
+        
         protected   $blocks = [];
         public      $blocks_map = []; // typically [date] = DataBlock
 
@@ -52,6 +53,8 @@
         protected   $load_method = '';  // REST loader for kind of data
         protected   string $data_name;  // for tables naming and logging
 
+        protected  $stats_table = '';
+
         protected   $table_create_code = ''; // for MySQL loaded by CorrectTables
         protected   $table_create_code_ch = ''; // for ClickHouse loaded by CorrectTables
 
@@ -88,9 +91,11 @@
 
         public function __construct(DownloadManager $mngr, \stdClass $ti) {
             $this->oldest_ms = $this->db_oldest = time_ms();
-            parent::__construct($mngr, $ti);
+            parent::__construct($mngr, $ti);            
             if (!$this->data_name)
                 throw ErrorException("~C91ERROR:~C00 data_name not set for {$this->symbol} before calling constructor");
+
+            $this->stats_table = $mngr->TableName("stats__{$this->ticker}");
             $this->table_name = $mngr->TableName("{$this->data_name}__{$this->ticker}");
             $this->tables['data'] = $this->table_name;
             $day_start = floor_to_day(time());  
@@ -251,12 +256,15 @@ SKIP_DOWNLOAD:
             $this->table_create_code = null;          
             
             $hour = date('H');
-            
-            // TODO: Not RC. removing obsolete tables
-            $query = sprintf("DROP TABLE iF EXISTS `%s.%s__%s`", DB_NAME, $this->data_name, $this->ticker);
-            $mysqli_df->try_query($query);
-            $query = sprintf("DROP TABLE iF EXISTS `__%s`", $this->ticker);
-            $mysqli_df->try_query($query);
+
+            if (DEBUGGING) { // TODO: remove block from release            
+                $query = "ALTER TABLE `download_history` ADD COLUMN IF NOT EXISTS `result` VARCHAR(32) NOT NULL AFTER `volume`";
+                $mysqli->try_query($query);                 
+                $query = sprintf("DROP TABLE iF EXISTS `%s.%s__%s`", DB_NAME, $this->data_name, $this->ticker);
+                $mysqli_df->try_query($query);
+                $query = sprintf("DROP TABLE iF EXISTS `__%s`", $this->ticker);
+                $mysqli_df->try_query($query);
+            }
 
             log_cmsg("~C97#CORRECT_TABLE:~C00 checking problems for `%s` ", $table_name);
             $table_code = null;
@@ -359,6 +367,10 @@ DUMP_SQL:
 
         public function CleanupBlock(DataBlock $block) { // possible override in child class
             global $chdb, $mysqli_df;
+
+            if (0 == ($this->data_flags & DL_FLAG_REPLACE)) 
+                return;
+
             if (1 == $this->days_per_block)
                 $bounds = "Date(ts) = '{$block->key}'";
             else {
@@ -1034,12 +1046,9 @@ SKIP_CHECKS:
                 log_cmsg("~C91#WARN:~C00 for %s end time %s in DB < EXCHANGE_START_SEC", $this->ticker, format_ts($end));
                 $end = EXCHANGE_START_SEC;
             }
-
+            
             if ($end <= $start)  {                
-                log_cmsg("~C97#HISTORY_FULL:~C00 database oldest record time %s", color_ts($end));
-                $this->head_loaded = true;                
-                if ($this->initialized) return;
-                $end = $start + 1 * SECONDS_PER_DAY - 1; // in seconds                 
+                $end = time(); // in seconds                 
             }
 
             if ($start >= $end) {
@@ -1048,21 +1057,28 @@ SKIP_CHECKS:
                 $end = floor_to_day(time()) + SECONDS_PER_DAY - 60;                                     
             }
 
-            $blocks_count = count($this->blocks);
+            $month_ago = format_ts(time() - 30 * SECONDS_PER_DAY);
+            // журнал скачивания предупреждает частые повторные попытки, если данные "не бьются" и считаются неполными. Остается некоторый шанс, что биржи по запросам на тикеты восстановят данные... 
+            // так что очистка в следующей строке, позволит через месяц заново запросить данные
+            sqli()->try_query("DELETE FROM `download_history` WHERE (`ticker` = '{$this->ticker}') AND (`ts` < '$month_ago')");
+
+            $blocks_count = $this->BlocksCount();
             if (0 == $blocks_count && $this->data_flags & DL_FLAG_HISTORY) 
                 $this->InitBlocks($start, $end); // here can also defined last_block
             elseif ($blocks_count > 10)
                 log_cmsg("~C33#PREPARE_DL:~C00 already have %d blocks, scaning disabled", $blocks_count);
             
-            $n_blocks = $this->BlocksCount();
-            if ($n_blocks > 0) { 
+            $blocks_count = $this->BlocksCount();
+            if ($blocks_count > 0) { 
                 $start_tss = gmdate(SQL_TIMESTAMP, $start);
                 $end_tss = gmdate(SQL_TIMESTAMP, $end);
-                log_cmsg("~C97#MAPPING:~C00 performed for %s, produced %d blocks, from %s to %s", $this->ticker, $n_blocks, $start_tss, $end_tss);
+                log_cmsg("~C97#MAPPING:~C00 performed for %s, produced %d blocks, from %s to %s", $this->ticker, $blocks_count, $start_tss, $end_tss);
             }            
             else {
-               $this->head_loaded = true;
-               $this->nothing_to_download = $this->zero_scans > 0;
+                $this->head_loaded = true;               
+                $this->nothing_to_download = $this->zero_scans > 0;
+                if ($this->loaded_full() && !$this->initialized)
+                    log_cmsg("~C97#HISTORY_FULL:~C00 nothing planned for download/recovery");
             }
 
             $last = $this->db_last(false, 3); // in seconds

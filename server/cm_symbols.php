@@ -23,6 +23,9 @@
     if (!isset($db_configs['datafeed'])) 
         error_exit("~C91#FATAL:~C97 datefeed~C00 DB config not exists, used %s for config", $fname);       
 
+    $mt = filemtime(__FILE__);
+    header("Content-version: script modified ".date(SQL_TIMESTAMP, $mt));
+
     $color_scheme = 'cli';
     $show_perf = rqs_param('perf', false);    
     $t_start = pr_time();
@@ -78,7 +81,7 @@
     if (str_in($code, "p$year"))
         $opt = "PARTITION (p2025)";
     else {
-       $msg = format_color("~C31#PERF_WARN:~C00 no parition for year %s dected in table %s for server %s: %s", $year, $t_listings, $db_alt_server, $mysqli->server_info );
+       $msg = format_color("~C31#PERF_WARN:~C00 no parition for year %s detected in table %s for server %s: %s", $year, $t_listings, $db_alt_server, $mysqli->server_info );
        fputs($log_file, $msg);
     }
 

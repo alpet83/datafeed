@@ -13,6 +13,8 @@
  WARNING: For debugging purposes need access to /tmp and /cache folder (create it!), with free at least 10G space inside. Better using ZRAM LZ4/ZSTD disks for both, with commands like: zramctl -f && zramctl -a lz4 -s 16G /dev/zram1 && mkfs.ext4 /dev/zram1 && mount /dev/zram1 /cache
      
  NOTE: This is a draft version of the file, there will be additions 
+ 
+ Any questions and feedback please send to project chat https://t.me/svcpool_chat
    
  
  
