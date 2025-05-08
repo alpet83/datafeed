@@ -228,7 +228,7 @@
 
                 $row = [$rec->open, $rec->close, $rec->high, $rec->low, $rec->volume];
                 if (!$intraday)
-                    $row [CANDLE_TRADES] = $rec->trades;
+                    $row [CANDLE_TRADES] = $rec->trades ?? 0;
 
                 if (isset($result[$tk])) {
                     $v = $rec->volume;
@@ -319,7 +319,7 @@
             $url = $this->rest_api_url.'trade/bucketed';
             $per_once = min($per_once, 1500); 
 
-            $params = ['symbol' => $this->symbol, 'binSize' => '1d', 'columns' => 'open,close,high,low,volume', 
+            $params = ['symbol' => $this->symbol, 'binSize' => '1d', 'columns' => 'open,close,high,low,volume,trades', 
                        'partial' => 'true', 'reverse' => 'false', 'count' => $per_once];                      
             $cursor = 0; // is_array($res) ? count($res) - 1 : 0;            
 

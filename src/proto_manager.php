@@ -277,11 +277,12 @@
             if ($elps < 100)  return;           
             $this->ws_connect_t = time();
             log_cmsg("~C91 #WS_WARN:~C00 WebSocket reconnect due %s, realtime loaders %d", $reason, count($loaders));
+            $ws = $this->ws;
             $this->ws_reconnects ++;
             $this->ws_active = false;            
             try { 
-                if (is_object($this->ws))
-                    $this->ws->close();
+                if (is_object($ws))
+                    $ws->close();
             } catch (Exception $E) {
                 $this->ws = null;
             }
@@ -364,7 +365,7 @@
                 $ws_lag = time() - $this->ws->last_ping;            
                 
             }
-            $ots_map = [];
+            $sort_v = [];
             $keys = [];
             $minute = date('i') * 1 + date('s') / 60;
             $full_loaded = 0;
@@ -380,19 +381,26 @@
                     }
                     $elps = time() - $loader->rest_time_last;
                     if ($elps >= 30) {
-                        $ots_map [] = $loader->oldest_ms; // время последней загруженной записи, чем оно больше, тем приоритет загрузки ниже
+                        $sort_v [] = $loader->rest_time_last; 
                         $keys []= $pair_id;
                     }
                 }
-            // загрузчки сортируются в порядке возрастания самого старого тика, чтобы наибольшее отставание компенсировалось чаще
-            array_multisort($keys, SORT_ASC, $ots_map);     
+            // загрузчки сортируются в порядке времени последней загрузки REST, чтобы самым отстающим больше шансов было
+            array_multisort($keys, SORT_ASC, $sort_v);     
             $minute_i = floor($minute);            
             if ($minute_i != $this->minute) {
                 $this->minute = $minute_i;
                 log_cmsg("~C92#ALIVE~C00(%d): cycles %5d, scheduled for history download %3d blocks for %3d tickers, full loaded %3d / %3d loaders; WebSocket ping elps = %d, elps = %d seconds, reconnects = %d", 
                             getmypid(), $this->cycles, $total_blocks, count($keys), $full_loaded, count($this->loaders), $ws_lag, $ws_elps, $this->ws_reconnects);         
-                $ots_dump = array_map('format_tms', $ots_map);
-                log_cmsg('~C93#DBG:~C00 oldest sequence %s', implode(', ', $ots_dump));
+                $ts_dump = [];
+                foreach ($sort_v as $i => $t) {
+                    $pair_id = $keys[$i];
+                    $ts = $t > 0 ? color_ts($t) : 'never';
+                    $loader = $this->GetLoader($pair_id, 'pair_id');
+                    $ticker = $loader ? $loader->ticker : "#$pair_id?";
+                    $ts_dump []= sprintf("%s@%s", $ticker, trim($ts));
+                }
+                log_cmsg('~C93#DBG:~C00 rest_time_last sequence %s', implode(', ', $ts_dump));
                 $this->SaveActivity();            
                 $this->ProcessWS(true);
             }
@@ -414,7 +422,7 @@
             }
             if ($failed_sub > 0 && $this->ws_active)
                 $this->SubscribeWS(); // try to re-subscribe
-            usefull_wait(1000000);
+            usefull_wait(10000);
         }
 
         public function Stop (){
@@ -571,7 +579,7 @@
                 $elps = $now - $last_ping;
                 if ($elps > 30) 
                     try {
-                        if ($uptime < 180)
+                        if ($uptime < 180 && $elps < 3600)
                             log_cmsg("~C94 #WS_PING_LATE:~C00 previus ping elapsed time %d sec, unreaded %d bytes", $elps, $ws->unreaded());
                         $ws->ping();                        
                         if ($elps >= 60) $wait = true;

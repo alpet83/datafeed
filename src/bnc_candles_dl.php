@@ -46,7 +46,8 @@
         public   function   __construct(DownloadManager $mngr, stdClass $ti) {
             $this->days_per_block = 1;
             $this->default_limit = 1000; // include excess for flood            
-            parent::__construct($mngr, $ti);                                    
+            parent::__construct($mngr, $ti);         
+            $this->blocks_at_once = 10;  // exchange can return 1000 candles with rate over 1 per second. Main limits is DB performance... but many blocks at once is also high mem usage
             $this->CreateTables();            
             $this->RegisterSymbol('candles', $this->pair_id);                       
             if (0 === stripos($ti->symbol, 'BTCUSD') || 0 === stripos($ti->symbol, 'ETHUSD'))
@@ -140,7 +141,18 @@
             if ($end)
                 $params['endTime'] = $end * 1000;
 
-            return $this->LoadData($block, $url, $params, $ts_from, $backward_scan);            
+            $res = $this->LoadData($block, $url, $params, $ts_from, $backward_scan);            
+            preg_match('/X-MBX-USED-WEIGHT-(\d*\S):\D*(\d*)/', strtoupper($this->last_api_headers), $m);
+            if (count ($m) > 2) {
+                log_cmsg("~C94 #RATE_LIMIT:~C00 %s", $m[0]); 
+                if ($m[2] >= 5000) { // TODO: use limit from API
+                    $rl = $this->get_manager()->rate_limiter; 
+                    $rl->max_rate -= 10;
+                    $rl->max_rate = max($rl->max_rate, 15);
+                    $rl->SpreadFill();
+                }
+            }
+            return $res;
         }
 
         public function LoadDailyCandles(int $per_once = 1000, bool $from_DB = true): array|null {

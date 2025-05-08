@@ -352,8 +352,11 @@
                 log_cmsg("~C92#TABLE_OK:~C00 Used actual Engine ");
             else  {
                 log_cmsg("~C31#WARN_UPGRADE:~C00 changing engine for table %s from %s", $table_name, $this->table_engine);
-                $query = "REPLACE TABLE  $table_name ENGINE  ReplacingMergeTree(ts) ORDER BY trade_no PARTITION BY toStartOfMonth(ts)  AS SELECT * FROM $table_name";
-                $mysqli_df->try_query($query);
+                $query = "REPLACE TABLE $table_name ENGINE  ReplacingMergeTree(ts) ORDER BY trade_no PARTITION BY toStartOfMonth(ts)  AS SELECT * FROM $table_name";
+                if ($mysqli_df->try_query($query)) 
+                    log_cmsg("~C93 #UPGRADED:~C00 %s ", $mysqli_df->show_create_table($table_name));
+                else
+                    log_cmsg("~C91#FAILED:~C00 query %s", $query);
             }                
             $mysqli_df->try_query("ALTER TABLE $table_name ADD INDEX IF NOT EXISTS ts ts TYPE set(0)  GRANULARITY 16;");
             $mysqli_df->try_query("ALTER TABLE $table_name MATERIALIZE INDEX ts");

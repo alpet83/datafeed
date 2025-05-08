@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS `@TABLENAME` (
         `buy` Bool NOT NULL,
         `trade_no` String NOT NULL,
         INDEX ts ts TYPE minmax GRANULARITY 16 
+)
 ENGINE = ReplacingMergeTree(ts)
 ORDER BY (trade_no)
 PARTITION BY toStartOfMonth(ts)

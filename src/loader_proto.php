@@ -13,6 +13,8 @@
 
     const VERIFY_TS_DEFAULT = '2012-01-01 00:00';
 
+    const BEGIN_2001 = 978300000; // GMT start of 2001 year
+
     // offsets in cache row
     const CANDLE_OPEN = 0;
     const CANDLE_CLOSE = 1;
@@ -94,6 +96,16 @@
         return trim($ts, 'Z ');
     }
 
+    function color_tms(mixed $tms) {
+        if (null === $tms)
+            return 'NULL!!!';
+        if (is_numeric ($tms)) {
+            verify_timestamp($tms, 'from color_ts', '2001-01-01 00:00:00');
+            $tms = format_tms( round($tms));
+        }
+        return color_ts($tms);
+    }
+
     function b2s(bool $b, array $map = ['~C91failed', 'success']): string {
         return $b ? $map[1] : $map[0];
     }
@@ -117,13 +129,14 @@
 
         public      $data_flags = 0;    // download options set: 1 - use REST, 2 - use WS
         public      $rest_api_url = '';
+        public      $rest_time_last = 0;
         
         public      $manager = null;   // owner class
 
         public      $normal_delay = 300;
         public      $rest_errors = 0;
 
-        public      $rest_time_last = 0;
+        
 
         /**  SQL table_name in datafeed DB   */
         public      $table_name = '';

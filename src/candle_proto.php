@@ -12,7 +12,7 @@
     
     
 
-    class  CandlesCache extends DataBlock  {
+    class  CandlesCache extends DataBlock implements Countable  {
 
         public $interval = 60; // in seconds
 
@@ -213,12 +213,14 @@
             $this->table_corrected = true;            
             $mysqli = sqli();
             $table_name = $this->table_name;
+            $t_start = pr_time();
             if (!$mysqli->table_exists($table_name)) {
                 log_cmsg("~C31#WARN:~C00 table %s not exists, trying to create", $this->table_name);
                 $this->CreateTables();
             }
 
             parent::CorrectTables();           
+            /*
             $query = "DELETE FROM $table_name WHERE (open = 0) AND (volume = 4096)";
             if ($mysqli->try_query($query) && $chdb)  // remove invalid rows
                 $chdb->write($query);             
@@ -226,6 +228,7 @@
             $query = "DELETE FROM $table_name WHERE volume = 0 AND MINUTE(ts) > 0";
             if ($mysqli->try_query($query) && $chdb)
                 $chdb->write($query);             
+            //*/
 
             if (strlen($this->table_create_code) < 10)
                 throw new Exception("~C91#ERROR:~C00 table {$this->table_name} code not retrieved: ".var_export($this->table_create_code, true));
@@ -257,7 +260,9 @@
             $code = $mysqli->show_create_table($sh_table);
             if (!str_in($code, 'target_count'))
                 $mysqli->try_query("ALTER TABLE `$sh_table` ADD COLUMN `target_count` INT UNSIGNED NOT NULL DEFAULT '0'"); // add control trades count
-            
+            $elps = pr_time() - $t_start;
+            if ($elps > 0.5)
+                log_cmsg("~C96 #PERF_CORRECT_TABLES:~C00 ~C00 elapsed %.1f sec", $elps);            
         }    
 
         public function CreateTables(): bool {
@@ -594,7 +599,7 @@
             $load_result = 'full-filled';
             if ('' == $volume_info  && '' == $price_info || -1 == $block->index && $loaded <= 1440) {                
                 $total_pp = 100 * $this->total_avail_vol / $this->total_target_vol;
-                $msg = format_color("$prefix($symbol/$index):~C00 %s, saldo volume %8s, CR: %s, progress %3.1f%%, filled in session %d: %s ", 
+                $msg = format_color("$prefix($symbol/$index):~C00 %s, saldo volume %8s, CR: %s, progress %5.2f%%, filled in session %d: %s ", 
                             strval($block), format_qty($volume), $block->info, $total_pp, $block->fills, $filled);       
             }
             else  {                
@@ -868,7 +873,7 @@
 
             
             $stats = $mysqli_df->select_map('date, day_start, day_end, count_minutes as count, volume_minutes as volume, volume_day, repairs', $this->stats_table, '', MYSQLI_OBJECT);
-
+            $retry_map = $mysqli_df->select_map('`date`,COUNT(ts)', 'download_history', "WHERE kind = 'candles' AND ticker = '{$this->ticker}' GROUP BY `date`");
             $this->ch_count_map = $this->LoadClickHouseStats(); // same stats as count_map
 
             $dump = [];
@@ -887,7 +892,7 @@
             }
             
             $schedule = $mysqli_df->select_map('date, target_volume', 'download_schedule', 
-                        "WHERE (ticker = '{$this->ticker}') AND (kind = 'candles') AND (target_volume > 0) ORDER BY date DESC LIMIT {$this->max_blocks}");
+                        "WHERE (ticker = '{$this->ticker}') AND (kind = 'candles') AND (target_volume > 0) ORDER BY date LIMIT {$this->max_blocks}");
 
             $ttv = 0;
             foreach ($this->daily_map as $dc)
@@ -941,13 +946,20 @@
                 $eod = "$day 23:59:59";
                 $exists = false;
                 $srec = null;
+
+                $retry_count = $retry_map[$day] ?? 0;
+                if ($retry_count > 3) {
+                    $excess = $retry_count - 3;
+                    $mysqli_df->try_query("DELETE FROM `download_history` WHERE `date` = '$day' AND `ticker` = '{$this->ticker}' AND (`kind` = 'candles') ORDER BY ts LIMIT $excess");
+                }
+
                 if (isset($stats[$day]))
-                    $srec = $stats[$day];                  
+                    $srec = $stats[$day];                          
 
                 if (isset($count_map[$day]))  {
                     $exists = true;
                     $drec = $count_map[$day];                    
-                    $drec->repairs = 0;
+                    $drec->repairs = $retry_count;
                     $count  = $drec->count;
                     $volume = $drec->volume;
                     $total_volume += $volume;
@@ -963,7 +975,7 @@
                     $srec->volume = 0;
                     $srec->count = 0;
                     $srec->volume_day = $day_vol;
-                    $srec->repairs = 0;
+                    $srec->repairs = $retry_count;
                 }
 
                 $close = 0;                
@@ -984,6 +996,7 @@
                 if ($srec->repairs > 1 && !$force) continue; // данные биржи не совпадают основовательно для разных ТФ, перезагружать смысла нет 
                 // валидация с загрублениями, т.к. биржи отдают иногда не полные данные, усложняющие вертикальную валидацию
                 $need_repair = abs($diff_pp) > $this->volume_tolerance || abs($close_diff_pp) > 0.15;
+                
                 if ($need_repair && $allow_repair || 0 == $count || $force) {  // допуск блоков требующих ремонт, без данных вообще, или уже включенных в расписание
                     if ($cursor < EXCHANGE_START_SEC) {
                         log_cmsg("~C91#WARN_OUTBOUND:~C00 have fake data in DB for %s %s?", $this->symbol, color_ts($cursor));
@@ -1016,8 +1029,7 @@
                     $msg = tss()." $msg\n";
                     if (!in_array($msg, $log_lines))                         
                         file_add_contents($log_name, $msg);           
-
-                    if ($this->BlocksCount() >= 200) break;
+                    
                     // по умолчанию создается блок в один день
                     $cursor = floor_to_day($cursor);                     
                     $eod = $cursor + SECONDS_PER_DAY - 1; // end of                                     
@@ -1032,9 +1044,9 @@
                     $voids []= sprintf('%d %s => %s, TV = %f', $alloc, color_ts( $block->lbound), color_ts( $block->rbound), $day_vol);
                     $alloc ++;
                     $info = strval($block);                
-                    if (isset($this->block_load_history[$info])) {
-                        log_cmsg("~C91#WARN_SKIP:~C00 block %s %s was loaded in this session, preventing again.", $this->ticker, $info);                        
-                        unset($this->blocks_map[$block->key]);
+                    if (isset($this->block_load_history[$info]) || $retry_count >= 2) {
+                        log_cmsg("~C91#WARN_SKIP:~C00 block %s %s was loaded many times, preventing again.", $this->ticker, $info);                        
+                        unset($this->blocks_map[$block->key]);                        
                         $this->blocks = array_values($this->blocks_map);
                         continue;
                     }                    

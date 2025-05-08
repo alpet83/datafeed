@@ -72,6 +72,8 @@
         
         protected   $rqs_cache_map = []; // [md5(rqs)] = API response
         protected   $cache_hit = false;
+
+        protected   $last_api_headers = ''; //  last API response headers for ratelimit control
         protected   $last_api_request = ''; // last API request by api_request function
  
         protected   $last_requests = []; // cache for API requests
@@ -110,7 +112,7 @@
 
 
         protected function api_request(string $url, array $params, int $cache_for = 180): string { // REST API request with typical GET params.
-            global $rest_allowed_ts;
+            global $rest_allowed_ts, $curl_resp_header;
             $res = 'fail?'; 
             $this->cache_file_last = '';
             $fresh_rqs = [];
@@ -176,6 +178,7 @@
 
             $this->last_api_request = $rqs;
             $res = curl_http_request($rqs);
+            $this->last_api_headers = $curl_resp_header;
             
             $this->total_requests ++;
             if (false !== strpos($res, 'ratelimit: error')) {
@@ -217,24 +220,28 @@ SKIP_DOWNLOAD:
             return sqli_df()->select_rows($column, $this->table_name, $params, $mode);
         }
 
-
-        public function db_first(bool $as_str = true, int $tp = 0) {
-            $ts = sqli_df()->select_value('MIN(ts)', $this->table_name);
-            return $this->db_timestamp($ts, $as_str, $tp);
+        public function db_first(bool $as_str = true, int $tp = 0) {            
+            $ts = sqli_df()->select_value('MIN(ts)', $this->table_name, "WHERE YEAR(ts) >= 2001");
+            if (!is_string($ts)) return null;            
+            $t = $tp < 3  ? strtotime($ts) : strtotime_ms($ts);
+            if ($t < BEGIN_2001) return null;            
+            return $this->db_timestamp($t, $as_str, $tp);
         }
         public function db_last(bool $as_str = true, int $tp = 0) {            
-            $ts = sqli_df()->select_value('MAX(ts)', $this->table_name);
-            return $this->db_timestamp($ts, $as_str, $tp);
+            $ts = sqli_df()->select_value('MAX(ts)', $this->table_name, '');
+            $t = $tp < 3  ? strtotime($ts) : strtotime_ms($ts);            
+            if (0 == $t) return null;            
+            return $this->db_timestamp($t, $as_str, $tp);
         }
         
         protected function db_timestamp(mixed $ts, bool $as_str = true, int $tp = 0): mixed {
             if ($ts === null || str_in($ts, '1970'))
-                return 0;            
+                return 0;           
 
-            if ($as_str || !is_string($ts))
-                return $ts;
+            if ($as_str) 
+                return  is_string($ts) ? $ts : $this->TimeStampEncode($ts, $tp);            
             else
-                return $this->TimeStampDecode($ts, $tp);
+                return is_string($ts) ? $this->TimeStampDecode($ts, $tp) : $ts;
         }
 
         public   function  loaded_full() {                        
@@ -656,7 +663,7 @@ SKIP_CHECKS:
                             log_cmsg("~C04~C93#TAIL_DOWNLOAD_BWD({$block->loops}):~C00 right block side before now");
                         }          
                         else
-                            log_cmsg("~C04~C97#TAIL_UPDATE:~C00 loading forward from %s", color_ts($after_ms));              
+                            log_cmsg("~C04~C97#TAIL_UPDATE:~C00 loading forward from %s", color_tms($after_ms));              
                     }
                     elseif ( $block->Covers_ms($after_ms) && $block->attempts_fwd < 3) { // $block->rbound - $block->max_avail > 300 &&                        
                         // выполнение этого кода очень желательно, чтобы история ложилась в БД последовательно хотя-бы внутри дня. Это оптимизирует доступ для волатильной истории
@@ -975,16 +982,15 @@ SKIP_CHECKS:
             return $this->table_info;                                               
         } 
         public function QueryTimeRange(): array { // request lowes and highest timestamps            
-            $range = [false, false];
-            $after = format_ts( EXCHANGE_START_SEC);                            
-            
+            $range = [false, false];                 
+            $init = $this->saved_max <= $this->saved_min;                         
             $min = $this->db_select_value('MIN(ts)',  '');
             $max = $this->db_select_value('MAX(ts)',  '');                           
             $min_t = strtotime($min);
             $max_t = strtotime($max);
             $coef = 3 == $this->time_precision ? 1000 : 1;
             if ($min_t > EXCHANGE_START_SEC && $max_t >= $min_t) {
-                if ($this->get_manager()->cycles < 10)
+                if ($this->get_manager()->cycles < 10 && $init)
                     log_cmsg("~C94#INFO_QTR:~C00 data range in DB: from [%s] to [%s] for %s", $min,  $max, $this->ticker);
                 $this->saved_min = $min_t;
                 $this->saved_max = $max_t;
@@ -1035,15 +1041,13 @@ SKIP_CHECKS:
             if (!$this->initialized)
                 $start = max($start, $limit_past);
             $this->history_first = $start;          
-
-
             $end = $this->db_first(false, 1); // in seconds!
             if (!is_int($end)) {
                 log_cmsg("~C107~C00 #HISTORY_VOID: ~C00~C40 required full history download for %s", $this->ticker);
                 $end = time() - 60;
             }
             if ($end < EXCHANGE_START_SEC) {
-                log_cmsg("~C91#WARN:~C00 for %s end time %s in DB < EXCHANGE_START_SEC", $this->ticker, format_ts($end));
+                log_cmsg("~C91#WARN:~C00 db_first(%s) end time %s in DB < EXCHANGE_START_SEC", $this->ticker, format_ts($end));
                 $end = EXCHANGE_START_SEC;
             }
             
@@ -1096,8 +1100,8 @@ SKIP_CHECKS:
             $mgr = $this->get_manager();
             $minute = date('i');            
             if (0 == $n_blocks) {                
-                if (0 == $this->loaded_blocks && $mgr->cycles < 30 && $load_history && !$this->loaded_full())
-                    log_cmsg("~C34#REST_DOWNLOAD:~C00 too small blocks to download for %s, head loaded = %s; scaning...", $this->ticker, $this->head_loaded ? 'yep' : '~C31nope');                    
+                if (0 == $this->loaded_blocks && 0 == $this->zero_scans && $mgr->cycles < 10 && $load_history)
+                    log_cmsg("~C34#REST_DOWNLOAD:~C00 too small blocks to download for %s, scaning...", $this->ticker);                    
                 $this->PrepareDownload();
                 $n_blocks = count($this->blocks);                             
             }
