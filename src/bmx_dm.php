@@ -2,6 +2,8 @@
     require_once('proto_manager.php');
     require_once 'bmx_websocket.php';        
     require_once 'lib/bitmex_common.php';    
+
+    $curl_default_opts->SetCompressed('gzip');
     
     abstract class BitMEXDownloadManager 
         extends DownloadManager {       

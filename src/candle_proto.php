@@ -182,11 +182,11 @@
         protected  $sync_map = []; // ClickHouse sync checked
 
         protected  $ch_count_map = []; // ClickHouse table stats 
-
         
-        
+        protected  $total_avail_blocks = 0;  // already loaded in DB
         protected  $total_avail_vol = 0;
         protected  $total_target_vol = 0;        
+        protected  $total_scheduled = 0;
                         
         private    int $lazy_rcv = 0;        
         
@@ -263,6 +263,17 @@
             $elps = pr_time() - $t_start;
             if ($elps > 0.5)
                 log_cmsg("~C96 #PERF_CORRECT_TABLES:~C00 ~C00 elapsed %.1f sec", $elps);            
+
+            if (!$this->partitioned) {
+                $query = "ALTER TABLE $table_name \n";
+                $query .= " PARTITION BY RANGE(UNIX_TIMESTAMP(ts)) (\n";
+                $query .= " PARTITION parch VALUES LESS THAN (UNIX_TIMESTAMP('2014-01-01 00:00:00')),\n";
+                for ($year = 2015; $year < 2030; $year ++) 
+                    $query .= sprintf(" PARTITION p$year VALUES LESS THAN (UNIX_TIMESTAMP('%d-01-01 00:00:00')),\n", $year + 1);                    
+                $query .= "PARTITION pfut VALUES LESS THAN (MAXVALUE) \n);";
+                log_cmsg("~C31 #PERF_WARN:~C00 trying add partitions for table %s", $this->table_name);
+                $this->partitioned = $mysqli->try_query($query);                
+            }
         }    
 
         public function CreateTables(): bool {
@@ -406,6 +417,16 @@
                 $data = json_decode($data);
             if (is_array($data)) {
                 $list = $this->ImportCandles($data, "WebSocket$context");
+                $info = $this->table_info;
+                if (is_object($list) && is_object($info)) {  // следующий апгрейд позволит не запрашивать данные из БД всякий раз                                      
+                    $start  = $list->firstKey();   
+                    if ($start < strtotime($info->min_time))
+                        $info->min_time = format_ts($start);
+
+                    $end = $list->lastKey();
+                    if ($end > strtotime($info->max_time))
+                        $info->max_time = format_ts($end);
+                }
                 return is_object($list) || is_array($list) ? count($list) : 0;
             }
             return 0;
@@ -453,6 +474,8 @@
                 log_cmsg("~C97#INIT_BLOCKS_END:~C00 expected download %d blocks, detected voids = %d, last block %s",  
                             count($this->blocks), $voids, strval($block));
             }
+            if (0 == $this->total_avail_vol)
+                $this->total_avail_vol = $mysqli_df->select_value('SUM(volume)', $this->table_name); // оставить этот запрос здесь, чтобы пореже терзать БД 
         }
 
 
@@ -598,9 +621,12 @@
 
             $load_result = 'full-filled';
             if ('' == $volume_info  && '' == $price_info || -1 == $block->index && $loaded <= 1440) {                
-                $total_pp = 100 * $this->total_avail_vol / $this->total_target_vol;
-                $msg = format_color("$prefix($symbol/$index):~C00 %s, saldo volume %8s, CR: %s, progress %5.2f%%, filled in session %d: %s ", 
-                            strval($block), format_qty($volume), $block->info, $total_pp, $block->fills, $filled);       
+                $this->total_avail_vol += $volume;
+                $this->total_avail_blocks ++;
+                $total_blocks = count($this->daily_map);
+                $total_pp = 100 * $this->total_avail_blocks / $total_blocks;
+                $msg = format_color("$prefix($symbol/$index):~C00 %s, saldo volume %8s, CR: %s, overall progress %4d blocks (%5.2f%%), filled in session %d: %s ", 
+                            strval($block), format_qty($volume), $block->info, $this->total_avail_blocks, $total_pp, $block->fills, $filled);       
             }
             else  {                
                 $repairs = 0;
@@ -813,9 +839,6 @@
                 log_cmsg(" ~C04~C97#CACHE_FLUSHED:~C00 for %s; updated/inserted %d / %d rows in(to) %s", strval($cache), $res, $cntr, $this->table_name);
                 $cache->Reset();
             }
-            if ($res > 100)
-                $this->total_avail_vol = $mysqli->select_value('SUM(volume)', $this->table_name); // some time its required
-
 
             if ($cntr > 1 && 0 == $res) {                
                 if ($cntr > 1000) {
@@ -871,6 +894,7 @@
                 $mysqli_df->raw_rows = null;
             }
 
+            $this->total_avail_blocks = count($count_map);
             
             $stats = $mysqli_df->select_map('date, day_start, day_end, count_minutes as count, volume_minutes as volume, volume_day, repairs', $this->stats_table, '', MYSQLI_OBJECT);
             $retry_map = $mysqli_df->select_map('`date`,COUNT(ts)', 'download_history', "WHERE kind = 'candles' AND ticker = '{$this->ticker}' GROUP BY `date`");
@@ -915,6 +939,7 @@
             $fill_map = [];
             $total_volume = 0;
             $total_volume_ch = 0;
+            
 
             $allow_clean =  $this->data_flags & DL_FLAG_REPLACE;
             $allow_repair = $this->data_flags & DL_FLAG_REPAIRS;
@@ -959,7 +984,7 @@
                 if (isset($count_map[$day]))  {
                     $exists = true;
                     $drec = $count_map[$day];                    
-                    $drec->repairs = $retry_count;
+                    $drec->repairs = max(0, $retry_count - 1);
                     $count  = $drec->count;
                     $volume = $drec->volume;
                     $total_volume += $volume;
@@ -975,7 +1000,7 @@
                     $srec->volume = 0;
                     $srec->count = 0;
                     $srec->volume_day = $day_vol;
-                    $srec->repairs = $retry_count;
+                    $srec->repairs = max(0, $retry_count - 1);
                 }
 
                 $close = 0;                
@@ -1040,6 +1065,8 @@
                     $block->avail_volume = $volume;                    
                     $block->recovery = $volume > 0;                    
                     $block->stat_rec = $srec;
+                    if ($exists)
+                        $this->total_avail_blocks --; // пока не считается полностью в наличии
                     
                     $voids []= sprintf('%d %s => %s, TV = %f', $alloc, color_ts( $block->lbound), color_ts( $block->rbound), $day_vol);
                     $alloc ++;
@@ -1108,18 +1135,20 @@
                 log_cmsg("~C93#INCOMPLETE_DUMP({$this->ticker}):~C00 %d: %s", $vcnt, implode("\t", $voids));
             }
             if (0 == $shcnt && $this->BlocksCount() > 0) {
-                $rows = [];
+                $rows = [];                
                 foreach ($this->blocks as $block) 
                     $rows []= sprintf("('%s', 'candles', '%s', %f, %f)", $block->key, $this->ticker, $block->target_volume, $block->target_close);        
                 $query = "INSERT IGNORE INTO `download_schedule` (`date`, `kind`, `ticker`, `target_volume`, `target_close`) VALUES\n";
                 $query .= implode(",\n", $rows).";";
+                $this->total_scheduled = count($rows);
                 if ($mysqli_df->try_query($query))
                     log_cmsg("~C93 #BLOCKS_SCHEDULED:~C00 added %d rows ", $mysqli_df->affected_rows);
-            }
+            } 
+            else
+                $this->total_scheduled = $mysqli_df->select_value('COUNT(*)', 'download_schedule', "WHERE (ticker = '{$this->ticker}') AND (kind = 'candles')");
 
             $this->blocks = array_values($this->blocks_map);          
-            $this->blocks = array_slice($this->blocks, -$this->max_blocks);  // limit block count
-            
+            $this->blocks = array_slice($this->blocks, -$this->max_blocks);  // limit block count            
 
             if (0 == count($this->blocks) && 0 == $total_count)
                 throw new Exception("~C91#ERROR:~C00 no planned blocks for {$this->symbol} with empty history");  
@@ -1131,7 +1160,7 @@
         protected function SyncClickHouse(string $day, object $target): float {
             global $chdb, $mysqli_df;            
             $cleanup = "DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (`date` = '$day')";
-            $mysqli_df->try_query($cleanup);
+            $mysqli_df->query($cleanup); // only local, not touch replica
 
             if (!is_object($chdb) || isset($this->sync_map[$day])) return 0;            
             $this->sync_map[$day] = 1;

@@ -379,9 +379,10 @@
                         $full_loaded ++; 
                         continue;
                     }
-                    $elps = time() - $loader->rest_time_last;
+                    $rest_active = max($loader->rest_time_last, $loader->init_time_last);
+                    $elps = time() - $rest_active;
                     if ($elps >= 30) {
-                        $sort_v [] = $loader->rest_time_last; 
+                        $sort_v [] = $rest_active; 
                         $keys []= $pair_id;
                     }
                 }

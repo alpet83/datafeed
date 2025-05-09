@@ -142,9 +142,13 @@
                 $params['endTime'] = $end * 1000;
 
             $res = $this->LoadData($block, $url, $params, $ts_from, $backward_scan);            
-            preg_match('/X-MBX-USED-WEIGHT-(\d*\S):\D*(\d*)/', strtoupper($this->last_api_headers), $m);
+            $hdrs = $this->last_api_headers;
+            preg_match('/^X-MBX-USED-WEIGHT-(\d*\S):\D*(\d*)/mi', $hdrs, $m);
             if (count ($m) > 2) {
-                log_cmsg("~C94 #RATE_LIMIT:~C00 %s", $m[0]); 
+                $ce = [];
+                preg_match('/^Content-encoding: (\S+)/mi', $hdrs, $ce);
+                $enc = $ce[1] ?? 'none';
+                log_cmsg("~C94 #RATE_LIMIT:~C00 %s, request time %.1f s, encoding %s", $m[0], $this->last_api_rqt, $enc); 
                 if ($m[2] >= 5000) { // TODO: use limit from API
                     $rl = $this->get_manager()->rate_limiter; 
                     $rl->max_rate -= 10;

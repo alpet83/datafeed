@@ -367,7 +367,7 @@
 
         public function db_first(bool $as_str = true, int $tp = 0) {
             if (!is_object($this->table_info))
-                $this->QueryTimeRange();  // load metadata                                     
+                $this->QueryTableInfo(sqli_df());  // load metadata                                     
             
             $start = $this->table_info->start_part;
             $ts = sqli_df()->select_value('MIN(ts)', $this->table_name, "WHERE _partition_value.1 <= Date('$start')");
@@ -375,7 +375,7 @@
         }
         public function db_last(bool $as_str = true, int $tp = 0) {
             if (!is_object($this->table_info))
-                $this->QueryTimeRange();  
+                $this->QueryTableInfo(sqli_df());  // load metadata 
             $end = $this->table_info->end_part;
             $ts = sqli_df()->select_value('MAX(ts)', $this->table_name, "WHERE _partition_value.1 >= Date('$end')");    
             return $this->db_timestamp($ts, $as_str, $tp);
@@ -953,9 +953,7 @@ RESTART:
             $sieved = $this->BlocksCount();                
             // стратегия поменялась: теперь загрузка с самого начала, до победного конца. Чтобы в БД все ложилось последовательно и доступ был оптимальный. Так собирать сложные свечи будет быстрее
             ksort($control_map);  
-            $first_day = array_key_first($control_map);
-
-            
+            $first_day = array_key_first($control_map);            
 
             foreach ($control_map as $day => $cstat) {                    
                 if (!$mgr->active) return;     // stop yet now
@@ -970,6 +968,7 @@ RESTART:
                     continue;
                 }                    
 
+                $bad_candles = false;
                 $block->minutes_volume = $candles_vol = $cstat->volume;                       
                 $meta = $days_map[$day];
                 $last_price = 0;
@@ -983,6 +982,7 @@ RESTART:
                         log_cmsg("~C31 #VOLUME_MISMATCH({$this->ticker}):~C00 for %s candles: saldo %s < daily %s, diff = %s (%.2f%%). Using from higher timeframe",
                                 $day, format_qty($candles_vol), format_qty($day_ex->volume), format_qty($extra), $extra_pp); 
                     $candles_vol =  $day_ex->volume; // 1D table can be manually patched, means have max priority                    
+                    $bad_candles = true;
                 }
 
                 $attempts = 0;                
@@ -1048,33 +1048,35 @@ RESTART:
                                             $meta->low, $meta->high, $last_price);
                 }               
                                 
-
+                $incomplete |= $bad_candles;
                 $block->code = $incomplete ? BLOCK_CODE::PARTIAL : BLOCK_CODE::FULL;
                 
                 if ($block->code == BLOCK_CODE::FULL) {
                     $full ++; // not add to rescan
                     continue;
                 }
+                if (0 == $meta->volume) 
+                    $block->code = BLOCK_CODE::NOT_LOADED;
+
+                $incomplete ++;                    
 
                 if ($attempts > 1) {
                     log_cmsg("~C33 #SCAN_BLOCK_SKIPPED({$this->ticker}):~C00 %s, already %d attempts to load", $day, $attempts);
                     continue; 
-                }
+                }                                    
 
-                if ($block->code == BLOCK_CODE::PARTIAL && $this->initialized) { // добавлять недозаполненные когда второй круг
-                    $incomplete ++;                    
-                    $block->index = count($rescan);                    
-                    $block->target_volume = $candles_vol;
-                    $block->target_close = $cstat->close;
-                    $block->target_count = $target_trades;
-                    $block->db_need_clean = $excess;
-                    $rescan []= $block;
-                    $tag = $excess ? '~C04~C97#BLOCK_NEED_RELOAD' : '~C94#BLOCK_NEED_FINISH';
-                    log_cmsg("$tag({$this->symbol}):~C00 prev index %4d, day %s [%s..%s, volume %10s%s in %d ticks]; %s margins [%.3f, %.3f] hours, code %s",
-                                    $block->index, $day, $min, $max, 
-                                    format_qty($meta->volume), $vol_info, $meta->count, $price_info,                                            
-                                        $void_left, $void_right, $block->code->name);
-                }    
+                $block->index = count($rescan);                    
+                $block->target_volume = $candles_vol;
+                $block->target_close = $cstat->close;
+                $block->target_count = $target_trades;
+                $block->db_need_clean = $excess;
+                $rescan []= $block;
+                $tag = $excess ? '~C04~C97#BLOCK_NEED_RELOAD' : '~C94#BLOCK_NEED_FINISH';
+                log_cmsg("$tag({$this->symbol}):~C00 index %4d, day %s [%s..%s, volume %10s%s in %d ticks]; %s margins [%.3f, %.3f] hours, code %s",
+                                $block->index, $day, $min, $max, 
+                                format_qty($meta->volume), $vol_info, $meta->count, $price_info,                                            
+                                    $void_left, $void_right, $block->code->name);
+                   
             } // foreach control_map - main scan loop
 
             log_cmsg("~C93#DBG:~C00 unchecked days %d", count($unchecked));
@@ -1122,8 +1124,8 @@ RESTART:
             }
 
             $tag = $this->initialized ? '#RELOAD_BLOCKS' : '#INIT_BLOCKS';
-            log_cmsg("~C97$tag:~C00 for symbol %s will used range %s .. %s, expected download %d blocks, %d sieved, %d incomplete, %d full", $this->symbol,
-                    $first, $last, $this->BlocksCount(), $sieved, $incomplete, $full);            
+            log_cmsg("~C97$tag:~C00 for symbol %s will used range %s .. %s, expected download %d blocks, %d sieved, %d incomplete, %d full from %d", $this->symbol,
+                    $first, $last, $this->BlocksCount(), $sieved, $incomplete, $full, count($control_map));            
         }   
     
 

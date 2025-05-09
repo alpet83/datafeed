@@ -245,6 +245,11 @@
 
         abstract public function ImportWS(mixed $data, string $context): int;
 
+        
+        protected function Limiter(): ?RateLimiter {
+            return $this->manager->rate_limiter;
+        }
+
         public function RegisterSymbol($enable_data, int $pair_id) {
             global $mysqli;
             $ticker_map = $this->tables['ticker_map'] ?? 'ticker_map';

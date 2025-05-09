@@ -39,7 +39,9 @@
 
         public     int $history_first = 0;  // first timestamp in ALL history, detected via API
 
-        public     int $cycle_time = 30;   // max time for REST Download cycle
+        /* max time for REST Download cycle. У многих бирж накопление rate limit привязывается к отдельному инструменту в течении минуты */
+        public     int $cycle_time = 50;   
+        public     bool $cycle_break = false;
         public     int $max_blocks = 30;  // how much blocks to load in one session
 
         public      $head_loaded = false;
@@ -47,6 +49,7 @@
 
         protected   $initialized = false;
         protected   $init_count = 0;
+        public      $init_time_last = 0;  // time of last blocks scan
 
         public      int $loaded_blocks = 0;
         protected   $import_method = '';  // converter from API format to common
@@ -75,6 +78,7 @@
 
         protected   $last_api_headers = ''; //  last API response headers for ratelimit control
         protected   $last_api_request = ''; // last API request by api_request function
+        protected   $last_api_rqt = 0.0; // last API request time in seconds
  
         protected   $last_requests = []; // cache for API requests
                 
@@ -165,20 +169,24 @@
                 }
             }
 
-            $limiter = $this->manager->rate_limiter;
+            $limiter = $this->Limiter();
             $avail = $limiter->Avail();
-            $delay = 15 * 1000000 / ($avail + 1); // progressive delay in microseconds
+            $delay = 100000;
 
-            $limiter->Wait($delay, 'usefull_wait');                     
+            if ($avail < 30) 
+                $delay = 15 * 1000000 / ($avail + 1); // progressive delay in microseconds                               
+            $limiter->Wait($delay, 'usefull_wait');                                 
             if (time() < $rest_allowed_ts) {
                 $avail = 0;
                 usefull_wait (3000000);
                 return 'TEMPORARY_BAN(ratelimit: error) rest_allowed_ts = '.date(SQL_TIMESTAMP, $rest_allowed_ts);
             }
 
+            $rq_start = pr_time();
             $this->last_api_request = $rqs;
             $res = curl_http_request($rqs);
             $this->last_api_headers = $curl_resp_header;
+            $this->last_api_rqt = pr_time() - $rq_start;
             
             $this->total_requests ++;
             if (false !== strpos($res, 'ratelimit: error')) {
@@ -221,14 +229,16 @@ SKIP_DOWNLOAD:
         }
 
         public function db_first(bool $as_str = true, int $tp = 0) {            
-            $ts = sqli_df()->select_value('MIN(ts)', $this->table_name, "WHERE YEAR(ts) >= 2001");
+            $info = $this->table_info;
+            $ts = is_object($info) ? $info->min_time : sqli_df()->select_value('MIN(ts)', $this->table_name, "WHERE YEAR(ts) >= 2001 LIMIT 1  -- db_first");
             if (!is_string($ts)) return null;            
             $t = $tp < 3  ? strtotime($ts) : strtotime_ms($ts);
             if ($t < BEGIN_2001) return null;            
             return $this->db_timestamp($t, $as_str, $tp);
         }
         public function db_last(bool $as_str = true, int $tp = 0) {            
-            $ts = sqli_df()->select_value('MAX(ts)', $this->table_name, '');
+            $info = $this->table_info;
+            $ts = is_object($info) ? $info->max_time : sqli_df()->select_value('MAX(ts)', $this->table_name, 'LIMIT 1  -- db_last');
             $t = $tp < 3  ? strtotime($ts) : strtotime_ms($ts);            
             if (0 == $t) return null;            
             return $this->db_timestamp($t, $as_str, $tp);
@@ -973,19 +983,40 @@ SKIP_CHECKS:
 
 
         public function QueryTableInfo(mixed $conn): ?stdClass {            
+            if (!$this->partitioned) return null;
+
             if (is_object($conn) && $conn instanceof mysqli_ex && $conn->is_clickhouse()) {
                 $db_name = $conn->active_db();
                 $this->table_info = $conn->select_row('MIN(partition) as start_part, MAX(partition) as end_part, MIN(min_time) AS min_time, MAX(max_time) AS max_time, SUM(rows) as size', 'system.parts',
                                                 "WHERE (table = '$this->table_name') AND (active = 1) AND (rows > 0) AND (database = '$db_name')", MYSQLI_OBJECT);   
             }
-            // TODO: need also implementation for chdb & MySQL native
+            elseif  (is_object($conn) && $conn instanceof mysqli_ex && !$conn->is_clickhouse()) {
+                $db_name = $conn->active_db();
+                $rows = $conn->select_rows('PARTITION_NAME as `name`, TABLE_ROWS as `rows`', 'INFORMATION_SCHEMA.PARTITIONS', "WHERE (TABLE_SCHEMA = '$db_name') AND (TABLE_NAME = '$this->table_name') AND (TABLE_ROWS > 0)", MYSQLI_ASSOC);
+                if (is_array($rows) && count($rows) > 0) {
+                    $this->table_info = $info = new stdClass();
+                    $info->start_part = $rows[0]['name'];
+                    $info->end_part = $rows[count($rows) - 1]['name'];
+                    $info->min_time = $conn->select_value("MIN(ts)", $this->table_name, " PARTITION ({$info->start_part}) LIMIT 1  -- QTI");
+                    $info->max_time = $conn->select_value("MAX(ts)", $this->table_name, " PARTITION ({$info->end_part}) LIMIT 1  -- QTI");                    
+                    $info->size = 0;
+                    foreach ($rows as $row) 
+                        $info->size += $row['rows'];                    
+                }
+                                                
+            }
+            // TODO: need also implementation for chdb 
             return $this->table_info;                                               
         } 
         public function QueryTimeRange(): array { // request lowes and highest timestamps            
+            $mysqli_df = sqli_df();
             $range = [false, false];                 
-            $init = $this->saved_max <= $this->saved_min;                         
-            $min = $this->db_select_value('MIN(ts)',  '');
-            $max = $this->db_select_value('MAX(ts)',  '');                           
+            $this->QueryTableInfo($mysqli_df);
+
+            $init = $this->saved_max <= $this->saved_min;                                  
+            $min = $this->db_first();
+            $max = $this->db_last();                           
+            
             $min_t = strtotime($min);
             $max_t = strtotime($max);
             $coef = 3 == $this->time_precision ? 1000 : 1;
@@ -1030,7 +1061,7 @@ SKIP_CHECKS:
             if (!$this->table_corrected)
                 $this->CorrectTables();
 
-            $this->QueryTimeRange();
+            
             
             $start = $this->HistoryFirst(); // method should cache return value in this->history_first                    
             
@@ -1038,8 +1069,10 @@ SKIP_CHECKS:
             if (!is_int($start))
                  $start = EXCHANGE_START_SEC;  // using abstract history start
 
-            if (!$this->initialized)
+            if (!$this->initialized) {
+                $this->QueryTimeRange();
                 $start = max($start, $limit_past);
+            }
             $this->history_first = $start;          
             $end = $this->db_first(false, 1); // in seconds!
             if (!is_int($end)) {
@@ -1089,12 +1122,14 @@ SKIP_CHECKS:
             if (0 == $this->newest_ms && $last !== null) 
                 $this->newest_ms = $last;
             $this->initialized = true;
+            $this->init_time_last = time();
         }
 
         public function RestDownload(): int {
             global $verbose, $rest_allowed_t;
             if ($this->rest_errors > 100)  return -1;                     
                           
+            $this->cycle_break = false;
             $load_history = ($this->data_flags & DL_FLAG_HISTORY) > 0;
             $n_blocks = count($this->blocks);
             $mgr = $this->get_manager();
@@ -1152,7 +1187,10 @@ SKIP_CHECKS:
                 $dump = json_encode($this->blocks);
                 $dump = str_ireplace('},{', "},\n {", $dump);
                 file_put_contents("$tmp/$class-{$this->symbol}_blocks.json", $dump);
-            }
+            } 
+            else                 
+                return 0;
+            
 
 
             $index = $n_blocks - 1;
@@ -1174,7 +1212,7 @@ SKIP_CHECKS:
             $prev_day = $this->cache->firstKey();
 
             // download history by mapping
-            while ($index >= 0 && $big_loads < $this->blocks_at_once && $mgr->active) {
+            while ($index >= 0 && $big_loads < $this->blocks_at_once && $mgr->active && !$this->cycle_break) {
                 usefull_wait(100000);
                 $block = $this->blocks[$index];
                 $key = intval($block->code->value);                                
@@ -1218,7 +1256,10 @@ SKIP_CHECKS:
                 
                 $index --;        
                 $elps = time() - $t_start;
-                if ($elps >= $this->cycle_time * 0.75 || str_in($this->last_error, 'timeouted')) break;
+                if ($elps >= $this->cycle_time * 0.85 || str_in($this->last_error, 'timeouted')) {
+                    $this->cycle_break = true;
+                    break;
+                }
                 if ($minute >= 58) break; // last minutes = minimal work
             } // while - loading blocks one by one
 

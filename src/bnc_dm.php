@@ -7,8 +7,9 @@
     define('EXCHANGE_START', strtotime_ms('2017-07-14 00:00')); 
     define('EXCHANGE_START_SEC', floor(EXCHANGE_START / 1000));
 
+    $curl_default_opts->SetCompressed('gzip');
+    
     USE WSSC\Contracts;
-
 
     abstract class BinanceDownloadManager 
         extends DownloadManager {
@@ -19,7 +20,7 @@
             $this->tmp_dir = $tmp_dir;
             $this->db_name = DB_NAME;
             // print_r($this->tables);
-            $this->rate_limiter = new RateLimiter(15);
+            $this->rate_limiter = new RateLimiter(180);  // for candles 6000 / 4 = 1500, for ticks 6000 / 25 = 240
             $this->rate_limiter->SpreadFill();
             parent::__construct($symbol, $data);
         }   
