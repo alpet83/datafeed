@@ -343,9 +343,11 @@
             $this->min_avail = $this->rbound;
             $this->history_fwd = [];
             $this->history_bwd = [];
-            if ($clean_cache) 
+            if ($clean_cache) {
                 foreach ($this->cache_files as $file_name)
-                    unlink($file_name);
+                    if (file_exists($file_name))
+                        unlink($file_name);
+            }
             $this->cache_files = [];
         }
 

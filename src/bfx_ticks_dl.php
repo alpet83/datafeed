@@ -3,13 +3,13 @@
     $last_exception = null;
 
     ob_implicit_flush();
-    set_include_path(".:./lib:/usr/sbin/lib");
-    require_once "common.php";
-    require_once 'esctext.php';
-    require_once "db_tools.php";
-    require_once "lib/db_config.php";
-    include_once "clickhouse.php";
-    require_once "rate_limiter.php";
+    set_include_path(".:./lib");
+    require_once 'lib/common.php';
+    require_once 'lib/esctext.php';
+    require_once 'lib/db_tools.php';
+    require_once 'lib/db_config.php';
+    require_once 'lib/clickhouse.php';
+    require_once 'lib/rate_limiter.php';
     require_once "ticks_proto.php";
     require_once "bfx_websocket.php";
     require_once "proto_manager.php";
@@ -17,10 +17,10 @@
     require_once 'vendor/autoload.php';
 
 
-    define('IDX_TID',   0);
-    define('IDX_MTS', 1);
-    define('IDX_AMOUNT', 2);
-    define('IDX_PRICE', 3);
+    const IDX_TID = 0;
+    const IDX_MTS = 1;
+    const IDX_AMOUNT = 2;
+    const IDX_PRICE = 3;
 
     echo "<pre>\n";
     $tmp_dir = '/tmp/bfx';
@@ -69,12 +69,14 @@
             return false;    
         }
 
-        public function   ImportTicks(array $data, string $source, bool $direct_sync = true): ?TicksCache {
+        public function   ImportTicks(array $data, string $source, bool $is_ws = true): ?TicksCache {
             $rows = [];            
             if (0 == count($data)) {
                 log_cmsg("~C31#WARN_SKIP_IMPORT:~C00 empty data from %s ", $source);
                 return null;
             }                
+
+            $t_start = pr_time();
             $mgr = $this->get_manager();
             $this->last_cycle = $mgr->cycles;
 
@@ -93,9 +95,12 @@
                 elseif ($n < 10)
                     log_cmsg("~C31#WARN_SKIP_IMPORT($n):~C00 %s from %s ", var_export($rec, true), $source);
 
-            ksort($rows);           
+            ksort($rows);
+            $elps = pr_time() - $t_start;
+            if ($elps > 1)
+                log_cmsg("~C96 #PERF_IMPORT_TICKS:~C00 %1.1f seconds for %5d rows, avg speed %d / sec", $elps, count($data), count($data) / $elps);
 
-            if ($direct_sync) {
+            if ($is_ws) {
                 $result->Store($block);
                 $this->SaveToDB($result, false);                        
             }
@@ -221,68 +226,9 @@
         }
     }
 
-    $ts_start = pr_time();
-    echo ".";
+    $ts_start = pr_time();    
+    $hour = gmdate('H');      
+    $manager = null;
+    RunConsoleSession('bfx');
 
-    date_default_timezone_set('UTC');
-    set_time_limit(15);    
     
-    $db_name_active = 'nope'; 
-    $symbol = 'all';
-
-    if ($argc && isset($argv[1])) {
-        $symbol = $argv[1];
-        if (isset($argv[2]))
-            $verbose = $argv[2];
-    }  
-    else
-        $symbol = rqs_param("symbol", 'all');         
-
-    $pid_file = sprintf($tmp_dir.'/ticks_dl@%s.pid', $symbol);
-    $pid_fd = setup_pid_file($pid_file, 300);        
-    $hour = date('H');
-    $log_name = sprintf('/logs/bfx_ticks_dl@%s-%d.log', $symbol, $hour); // 24 logs rotation
-    $log_file = fopen(__DIR__.$log_name, 'w');
-    flock($log_file, LOCK_EX);
-
-    if (file_exists(REST_ALLOWED_FILE)) {
-        $rest_allowed_t = file_get_contents(REST_ALLOWED_FILE);
-        log_cmsg("#DBG: RestAPI allowed after %s", gmdate(SQL_TIMESTAMP, $rest_allowed_t));    
-        if (time() < $rest_allowed_t) {
-            $elps = $rest_allowed_t - time();
-            log_cmsg("#WARN: RestAPI BAN applied up to %s", color_ts($rest_allowed_t));                 
-            set_time_limit(60);                      
-        }
-    }    
-
-    echo ".\n";
-    log_cmsg("~C97 #START:~C00 trying connect to DB...");
-    $mysqli = init_remote_db(DB_NAME);
-    if (!$mysqli) {
-        log_cmsg("~C91 #FATAL:~C00 cannot initialze DB interface! ");
-        die("ooops...\n");
-    }   
-
-    $mysqli_df = ClickHouseConnectMySQL(null, null, null, DB_NAME);  
-    if ($mysqli_df)
-        log_cmsg("~C93 #START:~C00 MySQL interface connected to~C92 %s@$db_name_active~C00 ", $db_servers[0] ); 
-    else
-        error_exit("~C91#FATAL:~C00 cannot connect to ClickHouse DB via MySQL interface! ");
-
-    $mysqli_df->replica = ClickHouseConnectMySQL('db-remote.lan:9004', null, null, DB_NAME);
-    if (is_object($mysqli_df->replica)) {
-        log_cmsg("~C103~C30 #WARN_REPLICATION:~C00 %s connected", $mysqli_df->replica->host_info);        
-    }        
-
-    $mysqli->try_query("SET time_zone = '+0:00'");
-    log_cmsg("~C93 #START:~C00 connected to~C92 localhost@$db_name_active~C00 MySQL"); 
-    $elps = -1;  
-    $hstart = floor(time() / 3600) * 3600;
-    $manager = new TicksDownloadManager($symbol);
-    main($manager);    
-    fclose($log_file);
-    flock($pid_fd, LOCK_UN);
-    fclose($pid_fd);  
-    system("bzip2 -f --best $log_name");
-    $log_file = false;
-    unlink($pid_file);

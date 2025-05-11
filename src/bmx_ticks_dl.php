@@ -2,17 +2,17 @@
 <?php
     $last_exception = null;
     ob_implicit_flush();
-    set_include_path(".:./lib:/usr/sbin/lib");
-    require_once "common.php";
-    require_once 'esctext.php';
-    require_once "db_tools.php";
-    require_once "lib/db_config.php";
-    include_once "clickhouse.php";
-    require_once "rate_limiter.php";
-    require_once "ticks_proto.php";
-    require_once "bmx_websocket.php";
-    require_once "proto_manager.php";
-    require_once "bmx_dm.php";
+    set_include_path(".:./lib");
+    require_once 'lib/common.php';
+    require_once 'lib/esctext.php';
+    require_once 'lib/db_tools.php';
+    require_once 'lib/db_config.php';
+    require_once 'lib/clickhouse.php';
+    require_once 'lib/rate_limiter.php';
+    require_once 'ticks_proto.php';
+    require_once 'bmx_websocket.php';
+    require_once 'proto_manager.php';
+    require_once 'bmx_dm.php';
     require_once 'vendor/autoload.php';
 
     $tmp_dir = '/tmp/bmx';
@@ -74,7 +74,7 @@
             return false;    
         }
 
-        public function     ImportTicks(array $data, string $source, bool $direct_sync = true): ?TicksCache {            
+        public function     ImportTicks(array $data, string $source, bool $is_ws = true): ?TicksCache {            
             $side_map = ['Sell' => false, 'Buy' => true, 'Dummy' => 2];            
             
             if (0 == count($data)) {
@@ -131,11 +131,11 @@
             }    
 
             $result->OnUpdate();           
-            if (!$direct_sync && 'WebSocket' == $source) {
+            if (!$is_ws && 'WebSocket' == $source) {
                 log_cmsg("~C91#WARN:~C00 trying import realtime data to cache, but source %s", $source);
-                $direct_sync = true;
+                $is_ws = true;
             }                        
-            if ($direct_sync)                                 
+            if ($is_ws)                                 
                 $this->SaveToDB( $result, false);                                                
             return $result;
         }        
@@ -203,73 +203,6 @@
     } // class TicksDownloadManager
 
     $ts_start = pr_time();
-    date_default_timezone_set('UTC');
-    set_time_limit(15);
-    
-    $db_name_active = 'nope'; 
-    $symbol = 'all';
-
-    if ($argc && isset($argv[1])) {
-        $symbol = $argv[1];
-        if (isset($argv[2]))
-            $verbose = $argv[2];
-    }  
-    else
-        $symbol = rqs_param("symbol", 'all');
-
-   
-    $hour = date('H');
-    $hstart = floor(time() / 3600) * 3600;     
-    $pid_file = sprintf($tmp_dir.'/ticks_dl@%s.pid', $symbol);
-    log_cmsg("~C97#INIT:~C00 trying lock PID file %s...", $pid_file);
-    $pid_fd = setup_pid_file($pid_file, 300);       
-    if (date('H') != $hour) 
-       error_exit("~C91#FATAL:~C00 pid lock wait timeouted, hour $hour ended");  
-    
-    $log_name = sprintf(__DIR__.'/logs/bmx_ticks_dl@%s-%d.log', $symbol, $hour); // 24 logs rotation    
-    $log_file = fopen($log_name, 'w');
-    while (!flock($log_file, LOCK_EX)) {
-        log_cmsg("~C91#ERROR:~C00 $log_name is already locked"); // here can be hangout 
-        sleep(10);
-    }
-
-    
-    
-    $chdb = null; // native ClickHouse connection not used
-    $mysqli = init_remote_db(DB_NAME);
-    if (!$mysqli)
-        error_exit("~C91#FATAL:~C00 cannot connect to MySQL DB! ");
-
-    log_cmsg("~C97 #START:~C00 Config DB %s, connecting ClickHouse...", $mysqli->active_db());
-
-    $mysqli_df = ClickHouseConnectMySQL();  
-    if ($mysqli_df) {
-        log_cmsg("~C93 #START:~C00 MySQL interface connected to~C92 %s@$db_name_active~C00 ", $db_servers[0] ); 
-        $mysqli_df->select_db(DB_NAME);
-    }
-    else
-        error_exit("~C91#FATAL:~C00 cannot connect to ClickHouse DB via MySQL interface! ");
-
-    $mysqli_df->replica = ClickHouseConnectMySQL('db-remote.lan:9004');
-    if (is_object($mysqli_df->replica)) {
-        log_cmsg("~C103~C30 #WARN_REPLICATION:~C00 %s connected", $mysqli_df->replica->host_info);        
-        $mysqli_df->replica->select_db(DB_NAME);
-    }
-
-    $elps = -1;          
-    $manager = new TicksDownloadManager($symbol);        
-    main($manager);    
-    fflush($log_file);
-    fclose($log_file);
-    flock($pid_fd, LOCK_UN);
-    fclose($pid_fd);        
-    
-    if (filesize($log_name) > 10000)
-        system("bzip2 -f --best $log_name");
-    else
-        print file_get_contents($log_name);
-    
-    $log_file = false;
-    unlink($pid_file);
-    system('tail -n 20 /var/log/php*.log');
-
+    $hour = gmdate('H');      
+    $manager = null;
+    RunConsoleSession('bmx');

@@ -3,13 +3,13 @@
     $last_exception = null;
 
     ob_implicit_flush();
-    set_include_path(".:./lib:/usr/sbin/lib");
-    require_once "common.php";
-    require_once 'esctext.php';
-    require_once "db_tools.php";
-    require_once "lib/db_config.php";
-    include_once "clickhouse.php";
-    require_once "rate_limiter.php";
+    set_include_path(".:./lib");
+    require_once 'lib/common.php';
+    require_once 'lib/esctext.php';
+    require_once 'lib/db_tools.php';
+    require_once 'lib/db_config.php';
+    require_once 'lib/clickhouse.php';
+    require_once 'lib/rate_limiter.php';
     require_once "candle_proto.php";
     require_once "bfx_websocket.php";
     require_once "proto_manager.php";
@@ -61,7 +61,7 @@
         } // constructor
  
 
-        public   function    ImportCandles(array $data, string $source,  bool $direct_sync = true): ?CandlesCache {
+        public   function    ImportCandles(array $data, string $source,  bool $is_ws = true): ?CandlesCache {
             global $verbose;            
             if (!is_array($data)) {
                 log_cmsg("~C91 #WARN:~C00 decode failed for json data, type = %s? ", gettype($data));
@@ -116,12 +116,12 @@
             }                                    
             $result->OnUpdate();
 
-            if ('WebSocket' == $source && !$direct_sync) {
+            if ('WebSocket' == $source && !$is_ws) {
                 log_cmsg("~C91 #WARN:~C00 indirect import realtime data from %s", debug_backtrace());
-                $direct_sync = true;
+                $is_ws = true;
             }
 
-            $this->ProcessImport($result, $direct_sync, $source, $updated, count($data));          
+            $this->ProcessImport($result, $is_ws, $source, $updated, count($data));          
             return $result;
         }  // function ImportCandles         
 
@@ -148,8 +148,12 @@
             $this->SaveToDB($this->cache); // flush cache before filling            
             $url = $this->rest_api_url."candles/trade:1D:{$this->symbol}/hist";  
             $params = ['limit' => $per_once, 'sort' => 1];                 
+            
+            $range = time() - $this->HistoryFirst();
+            $range /= SECONDS_PER_DAY;
             $cursor = EXCHANGE_START_SEC;
-            if (is_array($res) && count($res) > 0) {
+
+            if (is_array($res) && count($res) > $range * 0.9) {  // в большинстве случаев не обязательно перезагружать целиком
                 $cursor = array_key_last($res);
                 $cursor -= SECONDS_PER_DAY * 7;                
             }            

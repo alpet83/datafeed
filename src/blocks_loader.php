@@ -66,8 +66,8 @@
         protected   $table_info = null;        // record describes stats for table bigdata (start_part, end_part, min_time, max_time, size)
         protected   $table_need_recovery = false;
 
-        protected   $total_requests = 0;
-        
+        protected   $total_requests = 0;        
+        protected   $total_scheduled = 0;
 
         protected    $cache = null; // cache object, descendant from DataBlock                
 
@@ -79,6 +79,7 @@
         protected   $last_api_headers = ''; //  last API response headers for ratelimit control
         protected   $last_api_request = ''; // last API request by api_request function
         protected   $last_api_rqt = 0.0; // last API request time in seconds
+        protected   $last_api_wait = 0.0; // last request wait by limiter
  
         protected   $last_requests = []; // cache for API requests
                 
@@ -172,9 +173,8 @@
             $limiter = $this->Limiter();
             $avail = $limiter->Avail();
             $delay = 100000;
-
-            if ($avail < 30) 
-                $delay = 15 * 1000000 / ($avail + 1); // progressive delay in microseconds                               
+            $t_start = pr_time();            
+            $delay = 15 * 1000000 / ($avail + 1); // progressive delay in microseconds                               
             $limiter->Wait($delay, 'usefull_wait');                                 
             if (time() < $rest_allowed_ts) {
                 $avail = 0;
@@ -183,15 +183,20 @@
             }
 
             $rq_start = pr_time();
+            $this->last_api_wait = $rq_start - $t_start;
             $this->last_api_request = $rqs;
-            $res = curl_http_request($rqs);
+            $opts = new CurlOptions();
+            if ($this->current_interval < SECONDS_PER_DAY)   
+                $opts->wait_func = 'usefull_wait';     // need load WebSocket incoming data fast as possible, while intraday history download
+            $res = curl_http_request($rqs, null, $opts);
             $this->last_api_headers = $curl_resp_header;
             $this->last_api_rqt = pr_time() - $rq_start;
             
             $this->total_requests ++;
             if (false !== strpos($res, 'ratelimit: error')) {
                 $ban = random_int(300, 480);
-                log_cmsg("~C91#WARN:~C00 for endpoint %s request ratelimit is reached, due BAN ops disabled for $ban seconds, total_requests = %d, last delay = %.1f sec...", $url, $this->total_requests, $delay / 1e6); 
+                log_cmsg("~C91#WARN_RUSH:~C00 for endpoint %s request ratelimit is reached, due BAN ops disabled for $ban seconds, total_requests = %d / %d, last delay = %.1f sec... headers:\n %s",
+                                $url, $this->total_requests, $limiter->max_rate, $delay / 1e6, $curl_resp_header); 
                 $rest_allowed_ts = time() + $ban;
                 file_put_contents(REST_ALLOWED_FILE, $rest_allowed_ts); // expand for breaked script
                 return $res;
@@ -434,7 +439,7 @@ DUMP_SQL:
         }
 
    
-        abstract public function FlushCache();
+        abstract public function FlushCache(bool $rest = true);
 
         /** HistoryFirst must return timestamp (seconds) of exchange first candle */
         abstract public function HistoryFirst(): bool|int;
@@ -787,7 +792,7 @@ SKIP_CHECKS:
                         $added += $imp;                      
                         $last_density = $mini_cache->DataDensity();                      
                         $mini_cache->Store($this->cache);                         
-                        $this->OnCacheUpdate($block, $cache); // раздача данных всем блокам, включая текущий                         
+                        $this->OnCacheUpdate($block, $mini_cache); // раздача данных всем блокам, включая текущий                         
                         $count_diff = count($block) - $prev_count;
                         $dups_diff = $block->duplicates - $prev_dups;
                         if (BLOCK_CODE::FULL == $block->code)                             
@@ -850,7 +855,7 @@ SKIP_CHECKS:
 
                         $cache_oldest = $cache->oldest_ms();
                         $cache_newest = $cache->newest_ms();                        
-                        if ($block->Covered_by_ms($cache_oldest, $cache_newest) && BLOCK_CODE::FULL != $block->code && count($block) > 0)  {
+                        if (BLOCK_CODE::FULL != $block->code &  $block->Covered_by_ms($cache_oldest, $cache_newest) && count($block) > 0)  {
                             $block->code = BLOCK_CODE::FULL; 
                             $block->info = "cache {$cache->key} covered block by time";
                         }
@@ -865,7 +870,7 @@ SKIP_CHECKS:
                         if (count($block) > 0 && $block->IsEmpty()) 
                             $block->code = BLOCK_CODE::PARTIAL; //     
 
-                        if (0 == $left_volume && $block->code && $imp < $this->default_limit && !$block->IsFull()) {
+                        if (0 == $left_volume && BLOCK_CODE::FULL != $block->code && $imp < $this->default_limit && !$block->IsFull()) {
                             $block->code = BLOCK_CODE::FULL;
                             $block->info = 'target volume reached';
                         }
@@ -928,6 +933,8 @@ SKIP_CHECKS:
                 log_cmsg("~C91#EXCEPTION(LoadBlock):~C00 %s at %s:%d, trace: %s", $E->getMessage(), $E->getFile(), $E->getLine(), $E->getTraceAsString());
                 $block->code = BLOCK_CODE::INVALID;                
             }
+            if (count($cache) > 0)
+                $this->OnCacheUpdate($block, $cache); // контрольное обновление, полными данными
             return intval($added);
         }
 
@@ -958,8 +965,8 @@ SKIP_CHECKS:
             $t_start = pr_time(); 
             $res = $this->api_request($url, $params, $cache_ttl);  
             $elps = pr_time() - $t_start;
-            if ($elps > 10)
-                log_cmsg("~C31 #PERF_WARN:~C00 API request time %.1f sec, retrieved %d length string", $elps, strlen($res));
+            if ($this->last_api_rqt > 3)
+                log_cmsg("~C31 #PERF_WARN:~C00 API request time %.2f, wait %.1f, total %.1f sec, retrieved %d length string", $this->last_api_rqt, $this->last_api_wait, $elps, strlen($res));
             
             $block->last_api_request = $this->last_api_request;
             $data = json_decode($res, false);            
@@ -1113,7 +1120,7 @@ SKIP_CHECKS:
             }            
             else {
                 $this->head_loaded = true;               
-                $this->nothing_to_download = $this->zero_scans > 0;
+                $this->nothing_to_download = ($this->zero_scans > 0) && (0 == $this->total_scheduled);
                 if ($this->loaded_full() && !$this->initialized)
                     log_cmsg("~C97#HISTORY_FULL:~C00 nothing planned for download/recovery");
             }

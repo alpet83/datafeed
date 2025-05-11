@@ -50,32 +50,6 @@
             return "($row)"; // for INSER INTO
         }
 
-        protected function AddDummy(int $t) {
-            $best = $t;
-            if (isset($this->cache_map[$t])) return; // already exists
-            $best_dist = SECONDS_PER_DAY;
-            foreach ($this->cache_map as $tk => $rec) {                                
-                $dist = $tk - $best;
-                if (abs($dist) < $best_dist) {
-                    $best = $tk;
-                    $best_dist = abs($dist);
-                }
-            }            
-            $flags = CANDLE_FLAG_DUMMY;
-            if ($this->lbound == $t) 
-                $flags |= CANDLE_OPEN + 1;  
-
-            if (SECONDS_PER_DAY - 60 == $t) 
-                $flags |= CANDLE_CLOSE + 1;
-
-            $rec = [0, 0, 0, 0, 0, 0];
-            if (isset($this->cache_map[$best])) 
-                $rec = $this->cache_map[$best];                                    
-
-            $rec[CANDLE_FLAGS] = $flags;
-            $this->cache_map[$t] = $rec;
-        }    
-
         public function IsFullFilled(): bool {             
             if ($this->target_volume > 0) {
                 $saldo_vol = $this->SaldoVolume();
@@ -185,8 +159,7 @@
         
         protected  $total_avail_blocks = 0;  // already loaded in DB
         protected  $total_avail_vol = 0;
-        protected  $total_target_vol = 0;        
-        protected  $total_scheduled = 0;
+        protected  $total_target_vol = 0;                
                         
         private    int $lazy_rcv = 0;        
         
@@ -233,6 +206,8 @@
             if (strlen($this->table_create_code) < 10)
                 throw new Exception("~C91#ERROR:~C00 table {$this->table_name} code not retrieved: ".var_export($this->table_create_code, true));
             
+            
+
             $query = "ALTER TABLE {$this->table_name} ADD `flags` INT UNSIGNED NOT NULL DEFAULT '0' AFTER `volume`";                                    
             if ( !str_in($this->table_create_code, 'flags')) {  // в таблице нет 7-ой колонки?
                 log_cmsg("~C93#TABLE_UPGRAGE(MySQL):~C00 current code: %s", $this->table_create_code);
@@ -240,14 +215,24 @@
                     log_cmsg("~C92#TABLE_UPGRADE(MySQL):~C00 added column `flags` to %s", $this->table_name);            
             }
 
-            $query = "ALTER TABLE {$this->table_name} ADD COLUMN `flags` UInt32 DEFAULT 0 AFTER `volume`";
-            if ($chdb && strlen($this->table_create_code_ch) > 10 
-                      && !str_in($this->table_create_code_ch, 'flags') && $stmt = $chdb->write($query)) {
-                log_cmsg("~C93#TABLE_UPGRAGE(ClickHouse):~C00 current code: %s", $this->table_create_code_ch);
-                $msg = $stmt->isError () ? format_color("~C91#TABLE_UPGRADE_ERROR:~C00 %s", $stmt->dump()) 
-                                         : format_color("~C92#TABLE_UPGRADE(ClickHouse):~C00 added column `flags` to %s", $this->table_name);            
-                log_cmsg($msg);
+            $query = "ALTER TABLE {$this->table_name} ADD IF NOT EXISTS COLUMN `flags` UInt32 DEFAULT 0 AFTER `volume`";
+            $ch_code = $this->table_create_code_ch;
+            if ($chdb && strlen($ch_code) > 10) {
+                if (str_in($ch_code, 'ReplacingMergeTree(volume)'))
+                   log_cmsg("~C92#TABLE_OK:~C00 Used actual Engine ");
+                else  {
+                    log_cmsg("~C31#WARN_UPGRADE:~C00 changing engine for table %s", $table_name);
+                    $query = "REPLACE TABLE $table_name ENGINE  ReplacingMergeTree(volume) ORDER BY ts PARTITION BY toStartOfMonth(ts) AS SELECT * FROM $table_name";
+                    $stmt = $chdb->write($query);
+                    if ($stmt && $stmt->isError())                         
+                        log_cmsg("~C91#FAILED(ClickHouse):~C00 query %s", $query);
+                }
+
+                if (!str_in($ch_code, 'flags') && $stmt = $chdb->write($query))
+                     log_cmsg("~C93#TABLE_UPGRAGE(ClickHouse):~C00 current code: %s", $this->table_create_code_ch);                
+
             }
+
             $daily_table = "{$table_name}__1D";
             $code = $mysqli->show_create_table($daily_table);
             $q_trades = "ALTER TABLE $daily_table ADD COLUMN IF NOT EXISTS `trades` INT UNSIGNED DEFAULT '0' AFTER `volume`";
@@ -316,10 +301,9 @@
             return $res;
         }
   
-        public function FlushCache() {
+        public function FlushCache(bool $rest = true) {
             if ($this->cache instanceof CandlesCache) 
-                $this->SaveToDB($this->cache, true);                        
-            $this->cache->min_avail = $this->cache->max_avail = 0;
+                $this->SaveToDB($this->cache, true); 
         }
 
         public function CleanPoor() {
@@ -411,7 +395,7 @@
             return 0;            
         }
 
-        abstract public   function    ImportCandles(array $data, string $source, bool $direct_sync = true): ?CandlesCache;
+        abstract public   function    ImportCandles(array $data, string $source, bool $is_ws = true): ?CandlesCache;
         public function ImportWS(mixed $data, string $context): int {
             if (is_string($data))
                 $data = json_decode($data);
@@ -540,6 +524,15 @@
             return null;
         }
 
+        protected function OnBeginDownload(DataBlock $block) {     
+            if ($block->index < 0) return;
+            $date = $block->key;
+            $id = "{$block->index}:{$date}";
+            $tag = $block->db_need_clean ? '~C04~C97#BLOCK_START_RELOAD' : '~C93#BLOCK_START_LOAD';            
+            $target = $this->daily_map[$date] ?? [];
+            log_cmsg("$tag:~C00 %s %s, daily target = %s", $id, strval($block), json_encode($target));
+        }        
+
         public function OnBlockComplete(DataBlock $block) {
             if ($block->code == $block->reported) return;            
             $this->loaded_blocks ++;                       
@@ -547,8 +540,7 @@
             $filled = '~C43~C30['.$block->format_filled(60).']~C00';                    
             $lag_left = $block->min_avail - $block->lbound;
             $index = $block->index;
-            if ($index >= 0 && $lag_left > 60) {
-                $block->FillDummy();
+            if ($index >= 0 && $lag_left > 60) {                
                 $block->Store($this->cache); // save dummies
             }
             $this->last_error = '';
@@ -567,8 +559,13 @@
             $check = $mysqli_df->select_row("COUNT(*) as count,SUM(volume) as volume,MIN(low) as low, MAX(high) as high", $this->table_name,
                                             "WHERE DATE(ts) = '$date'", MYSQLI_OBJECT);
 
-            if ($check)
+            if ($check) {
                 $check->close = $mysqli_df->select_value('close', $this->table_name, "WHERE DATE(ts) = '$date' ORDER BY ts DESC"); // single last                                                
+                $query = "INSERT IGNORE INTO `download_schedule` (`date`, `ticker`, `kind`, `target_count`, `target_volume`) VALUES\n";
+                $query .= sprintf("('%s', '%s', 'sync-c', %d, %f)", $date, $this->ticker, $check->count, $check->volume);
+                $mysqli_df->try_query($query); // postpone sync with ClickHouse, also on replica if configured                
+                unset($this->sync_map[$date]);                
+            }
 
             $ftk = $block->firstKey();
             $ltk = $block->lastKey();            
@@ -620,6 +617,9 @@
                              format_qty($block->target_volume ?? 0),  format_qty($volume), $vdiff_pp, format_qty($block->avail_volume ?? 0));
 
             $load_result = 'full-filled';
+            
+
+
             if ('' == $volume_info  && '' == $price_info || -1 == $block->index && $loaded <= 1440) {                
                 $this->total_avail_vol += $volume;
                 $this->total_avail_blocks ++;
@@ -734,8 +734,8 @@
             if ($block)
                 $info = ',last matched '.strval($block);
 
-            log_cmsg("~C93#DBG_CACHE_UPDATED:~C00 with %d candles, %d duplicates, %d blocks covered$info, miss %s, full map size %d", 
-                       $size, $cache->duplicates, count($covered), json_encode($miss), count($full_map));         
+            log_cmsg("~C93#DBG_CACHE_UPDATED:~C00 with %d candles, %d duplicates, %d blocks covered$info, full map size %d", 
+                       $size, $cache->duplicates, count($covered), count($full_map));         
         }
 
         public function CheckCandle(mixed $tk, array $row, array &$errs = null): array {
@@ -767,16 +767,16 @@
             return $row;
         }
 
-        protected function ProcessImport(CandlesCache $cache, bool $direct_sync, string $source, int $updated, int $rows_count, int $flood = 0, int $strange = 0) {
+        protected function ProcessImport(CandlesCache $cache, bool $is_ws, string $source, int $updated, int $rows_count, int $flood = 0, int $strange = 0) {
             global $verbose;
             $now = time_ms();
             $cache->OnUpdate();
-            $target = $direct_sync ? $this->table_name : 'cache';
+            $target = $is_ws ? $this->table_name : 'cache';
             $ftk = $cache->firstKey();
             $ltk = $cache->lastKey();
             $cnt = count($cache);
 
-            if ($direct_sync && null !== $ltk) {
+            if ($is_ws && null !== $ltk) {
                 if ($ftk >= $this->last_block->lbound) 
                     $cache->Store($this->last_block);
 
@@ -788,7 +788,7 @@
             elseif (str_in($source, 'REST'))
                 $this->rest_loads += $cnt;
 
-            if ($verbose >= 3 && !$direct_sync) {
+            if ($verbose >= 3 && !$is_ws) {
                 $last = $cache->last();
                 log_cmsg("... into %s $target inserted %d, updated %d,  from %d rows; flood %d, strange %d, total in cache %.2fK candles,  result last [%s]=%s, last errors: %s",
                             $this->ticker, $cnt, $updated, $rows_count, $flood, $strange, 
@@ -808,32 +808,46 @@
             // multi-line insert
             global $chdb;
             // recursion possible, due SaveToDB called from InitBlocks for daily candles...
-            $mysqli = sqli();
-
-            $values = [];            
+            $mysqli = sqli();            
+            $values = [];           
+            
             foreach ($cache->keys as $tk) {                                               
-                if ($cache[$tk][CANDLE_VOLUME] > 0 || 0 == $tk % 3600)
-                    $values []= $cache->FormatRow($tk);
+                if ($cache[$tk][CANDLE_VOLUME] > 0 || 0 == $tk % 3600) 
+                    $values []= $cache->FormatRow($tk);                
             }
             
             $cntr = count($values);      
             if (0 == $cntr) return 0;             
+            $last_t = $cache->lastKey();
 
             $addf = '';
-            if ($this->current_interval < SECONDS_PER_DAY)
+            $latest = false;
+            $intraday = $this->current_interval < SECONDS_PER_DAY;
+            if ($intraday) {
                 $addf .= ', `flags`';
+                $latest = time() - $last_t < SECONDS_PER_DAY;
+            }
             else    
-                $addf .= ', `trades`'; 
+                $addf .= ', `trades`';      
 
+            $ignore = $latest ? '' : 'IGNORE'; // данные более чем суточной давности затиранию не подвергаются
             // DEFAULT FORMAT OCHLV!!!
-            $query = "INSERT INTO {$this->table_name} (`ts`, `open`, `close`, `high`, `low`, `volume` $addf)\n";
+            $query = "INSERT $ignore INTO {$this->table_name} (`ts`, `open`, `close`, `high`, `low`, `volume` $addf)\n";
             $query .= 'VALUES  '.implode(",\n", $values)."\n";
-            $query .= "ON DUPLICATE KEY UPDATE high = VALUES(high), low = VALUES(low), close = VALUES(close), volume = VALUES(volume);\n";            
-            
+            if (empty($ignore))
+                $query .= "ON DUPLICATE KEY UPDATE high = VALUES(high), low = VALUES(low), close = VALUES(close), volume = VALUES(volume);\n";                        
             if (!$mysqli->try_query($query)) 
-                throw new ErrorException("~C91#ERROR:~C00 query failed on MySQL server: {$mysqli->error}" );
+                throw new ErrorException("~C91#ERROR:~C00 query failed on MySQL server: {$mysqli->error}");           
                        
             $res = $mysqli->affected_rows;
+            if (!$intraday) {                                
+                $last = $cache->last();
+                $query = sprintf("UPDATE {$this->table_name} SET `high` = %f, `low` = %f, `close` = %f, `volume` = %f\n", 
+                                  $last[CANDLE_HIGH], $last[CANDLE_LOW], $last[CANDLE_CLOSE], $last[CANDLE_VOLUME]);
+                $query .= sprintf("WHERE Date(`ts`) = '%s' ", gmdate('Y-m-d',$last_t));                                  
+                $mysqli->try_query($query);                                  
+            }
+
             if ($reset) {
                 $mysqli->try_query('COMMIT');
                 log_cmsg(" ~C04~C97#CACHE_FLUSHED:~C00 for %s; updated/inserted %d / %d rows in(to) %s", strval($cache), $res, $cntr, $this->table_name);
@@ -947,7 +961,8 @@
 
             ksort($scan_map); // from newest to oldest
             foreach ($scan_map as $cursor => $row) {                
-                if ($today_t <= $cursor) continue;   // skip today due is for last block        
+                if ($today_t <= $cursor) continue;   // skip today due is for last block     
+                $bypass_repair = $allow_repair;    
                 $elps = time() - $scan_start;
                 if (!$mgr->active || $elps >= 60) break;  // stop signal maybe                  
                 // 0:open, 1:close, 2:high, 3:low, 4:volume, 5:trades
@@ -1022,7 +1037,8 @@
                 // валидация с загрублениями, т.к. биржи отдают иногда не полные данные, усложняющие вертикальную валидацию
                 $need_repair = abs($diff_pp) > $this->volume_tolerance || abs($close_diff_pp) > 0.15;
                 
-                if ($need_repair && $allow_repair || 0 == $count || $force) {  // допуск блоков требующих ремонт, без данных вообще, или уже включенных в расписание
+
+                if ($need_repair && $bypass_repair || 0 == $volume || 0 == $count || $force) {  // допуск блоков требующих ремонт, без данных вообще, или уже включенных в расписание
                     if ($cursor < EXCHANGE_START_SEC) {
                         log_cmsg("~C91#WARN_OUTBOUND:~C00 have fake data in DB for %s %s?", $this->symbol, color_ts($cursor));
                         continue;
@@ -1068,7 +1084,8 @@
                     if ($exists)
                         $this->total_avail_blocks --; // пока не считается полностью в наличии
                     
-                    $voids []= sprintf('%d %s => %s, TV = %f', $alloc, color_ts( $block->lbound), color_ts( $block->rbound), $day_vol);
+                    $voids []= sprintf('%d %s => %s, TV = %s', 
+                                        $alloc, color_ts( $block->lbound), color_ts( $block->rbound), '~C95'.format_qty($day_vol));
                     $alloc ++;
                     $info = strval($block);                
                     if (isset($this->block_load_history[$info]) || $retry_count >= 2) {
@@ -1091,13 +1108,15 @@
             }
 
             // в таблице расписания могут быть запросы на синхронизацию свечей, после восстановления из тиков
-            $sync_batch = $mysqli_df->select_map('date,target_volume', 'download_schedule', "WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (target_volume > 0) LIMIT 10");            
+            $sync_batch = $mysqli_df->select_map('date,target_volume', 'download_schedule', "WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (target_volume > 0) LIMIT 100");            
             if (count($sync_batch) > 0)
                 log_cmsg("~C33 #SYNC_BATCH:~C00 requested candles sync for %d days", count($sync_batch));
 
             foreach ($sync_batch as $date => $tv) {
-                if (isset($count_map[$date])) 
+                if (isset($count_map[$date])) {
                     $this->SyncClickHouse($date, $count_map[$date]);
+                    $mgr->ProcessWS(false);
+                }
                 else
                     log_cmsg("~C31 #WARN_SKIP_SYNC:~C00 no source data for %s ", $date);
             }            

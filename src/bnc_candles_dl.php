@@ -2,13 +2,14 @@
 <?php
     $last_exception = null;
     ob_implicit_flush();
-    set_include_path(".:./lib:/usr/sbin/lib");
-    require_once "common.php";
-    require_once 'esctext.php';
-    require_once "db_tools.php";
-    require_once "lib/db_config.php";
-    include_once "clickhouse.php";
-    require_once "rate_limiter.php";
+    set_include_path(".:./lib");
+    require_once 'lib/common.php';
+    require_once 'lib/esctext.php';
+    require_once 'lib/db_tools.php';
+    require_once 'lib/db_config.php';
+    require_once 'lib/clickhouse.php';
+    require_once 'lib/rate_limiter.php';
+    
     require_once "candle_proto.php";
     require_once "bnc_websocket.php";
     require_once "bnc_dm.php";
@@ -54,7 +55,7 @@
                 $this->normal_delay = 30;
         }
 
-        public   function    ImportCandles(array $data, string $source, bool $direct_sync = true): ?CandlesCache {
+        public   function    ImportCandles(array $data, string $source, bool $is_ws = true): ?CandlesCache {
             global $verbose;
             $this->last_error = '';
             $mysqli_df = sqli_df();
@@ -83,7 +84,7 @@
 
             $result = new CandlesCache($this);           
             $result->interval = $this->current_interval;
-            $result->mark_flags = $direct_sync ? CANDLE_FLAG_RTMS : 0;
+            $result->mark_flags = $is_ws ? CANDLE_FLAG_RTMS : 0;
             $tk = time();
             $intraday = $this->current_interval < SECONDS_PER_DAY;
             /* [
@@ -108,7 +109,7 @@
 
                 [$tms, $open, $high, $low, $close, $volume, $ctime, $qa_vol, $trades] = $rec;
                 $tk = floor($tms / 60000) * 60;
-                if ($direct_sync && $intraday && $tk < $last_block->max_avail) {
+                if ($is_ws && $intraday && $tk < $last_block->max_avail) {
                     $dups ++;
                     continue;
                 }
@@ -121,7 +122,7 @@
                     $result->AddRow($tk, $open, $close, $high, $low, $volume, $flags);
             }  
 
-            $this->ProcessImport($result, $direct_sync, $source, $updated, $rcnt, $flood, $strange);
+            $this->ProcessImport($result, $is_ws, $source, $updated, $rcnt, $flood, $strange);
             return $result;
         } // ImportCandles
 
@@ -166,7 +167,10 @@
             $table_name = "{$this->table_name}__1D";
 
             $after = EXCHANGE_START_SEC;
-            if (count ($stored) > 0) {
+            $range = time() - $this->HistoryFirst();
+            $range /= SECONDS_PER_DAY;           
+
+            if (count ($stored) > $range * 0.9) {
                 $after = array_key_last($stored);
                 $after = min (floor_to_day(time()), $after);
                 $after = floor_to_day($after);

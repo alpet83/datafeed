@@ -1,14 +1,14 @@
 <?php
-    require_once "proto_manager.php";
-    require_once "bnc_websocket.php";
+    require_once 'proto_manager.php';
+    require_once 'bnc_websocket.php';
 
     const DB_NAME = 'binance';
-    const HISTORY_MIN_TS = '2018-01-01 00:00:00'; // minimal history start for initial download
+    const HISTORY_MIN_TS = '2023-01-01 00:00:00'; // minimal history start for initial download
     define('EXCHANGE_START', strtotime_ms('2017-07-14 00:00')); 
     define('EXCHANGE_START_SEC', floor(EXCHANGE_START / 1000));
 
     $curl_default_opts->SetCompressed('gzip');
-    
+
     USE WSSC\Contracts;
 
     abstract class BinanceDownloadManager 
@@ -34,7 +34,6 @@
                 $this->SubscribeWS();
             }
         }
-
        
 
         protected function on_ws_event(string $event, mixed $data) {

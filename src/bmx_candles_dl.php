@@ -2,13 +2,14 @@
 <?php
     $last_exception = null;
     ob_implicit_flush();
-    set_include_path(".:./lib:/usr/sbin/lib");
-    require_once "common.php";
-    require_once 'esctext.php';
-    require_once "db_tools.php";
-    require_once "lib/db_config.php";
-    include_once "clickhouse.php";
-    require_once "rate_limiter.php";
+    set_include_path(".:./lib");
+    require_once 'lib/common.php';
+    require_once 'lib/esctext.php';
+    require_once 'lib/db_tools.php';
+    require_once 'lib/db_config.php';
+    require_once 'lib/clickhouse.php';
+    require_once 'lib/rate_limiter.php';
+    
     require_once "candle_proto.php";
     require_once "bmx_websocket.php";
     require_once "proto_manager.php";
@@ -140,7 +141,7 @@
             return $start;
         }
 
-        public   function    ImportCandles(array $data, string $source, bool $direct_sync = true): ?CandlesCache {
+        public   function    ImportCandles(array $data, string $source, bool $is_ws = true): ?CandlesCache {
             global $verbose;
             $this->last_error = '';
             $mysqli_df = sqli_df();
@@ -175,7 +176,7 @@
 
             $result = new CandlesCache($this);           
             $result->interval = $this->current_interval;
-            $result->mark_flags = $direct_sync ? CANDLE_FLAG_RTMS : 0;
+            $result->mark_flags = $is_ws ? CANDLE_FLAG_RTMS : 0;
             $tk = time();
             $t_table = "bitmex__ticks__{$this->ticker}";
             $have_ticks = false;
@@ -221,7 +222,7 @@
                 }          
 
                 // при прямой синхронизации подразумеваются полезными только свежие данные хвоста блока, чтобы поменьше обращаться к БД - пропуск старых
-                if ($direct_sync && $intraday && $tk < $last_block->max_avail) {
+                if ($is_ws && $intraday && $tk < $last_block->max_avail) {
                     $dups ++;
                     continue;
                 }
@@ -282,7 +283,7 @@
                 return null;
             }
 
-            $this->ProcessImport($result, $direct_sync, $source, $updated, $rcnt, $flood, $strange);                          
+            $this->ProcessImport($result, $is_ws, $source, $updated, $rcnt, $flood, $strange);                          
             return $result;            
         }                
 
