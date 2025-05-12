@@ -9,7 +9,7 @@
     require_once 'lib/db_config.php';
     require_once 'lib/clickhouse.php';
     require_once 'lib/rate_limiter.php';
-    
+
     require_once "candle_proto.php";
     require_once "bnc_websocket.php";
     require_once "bnc_dm.php";
@@ -266,13 +266,10 @@
             // MTS is int,   open, close, high, low, volume are float
             return is_array($row) && count($row) == 12 && is_int($row[0]) && is_numeric($row[5]); // MTS is int
         }
-    }
-
-    // TODO: следующая копипаста уже просит превратиться в функцию 
+    }    
 
     $ts_start = pr_time();
     $hour = gmdate('H');
     $hstart = floor(time() / 3600) * 3600;     
     $manager = null;
     RunConsoleSession('bnc');
-?>

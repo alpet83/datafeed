@@ -683,13 +683,12 @@
                 }
             }
 
-            if (is_object($check)) {
-                $load_result = substr($load_result, 0, 32);
-                $query = "INSERT INTO `download_history` (`ts`, `date`, `kind`, `ticker`, `count`, `volume`, `result`)\n VALUES";
-                $query .= sprintf("(NOW(), '$day', 'ticks', '%s', %d, %f, '%s')", 
-                                 $this->ticker, $check->count, $check->volume, $load_result);
-                sqli()->try_query($query); // по сути это журнал загрузки. Сверка с ним, позволит избежать повторов без ручной очистки                                
-            }
+                 
+            $load_result = substr($load_result, 0, 32);
+            $query = "INSERT INTO `download_history` (`ts`, `date`, `kind`, `ticker`, `count`, `volume`, `result`)\n VALUES";
+            $query .= sprintf("(NOW(), '$day', 'ticks', '%s', %d, %f, '%s')", 
+                            $this->ticker, $count, $check_volume, $load_result);
+            sqli()->try_query($query); // по сути это журнал загрузки. Сверка с ним, позволит избежать повторов без ручной очистки                                            
             $block->Reset($whole_load); // clean memory
         }
 
@@ -937,7 +936,7 @@
             
             $year = $this->scan_year;
 
-            $month = date('H') % 12 + 1; // scan single partition on DB - better efficiency. Full history covered twice per day
+            $month = date('g'); // scan single partition on DB - better efficiency. Full history covered twice per day
             $start = max($start, strtotime(HISTORY_MIN_TS));                                  
             if (strtotime("$year-$month-01") < $start) // ненужно сканировать глубже
                 return;     
