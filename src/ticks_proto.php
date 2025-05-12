@@ -836,10 +836,11 @@
                 
                 if ($ticks_volume > $block->target_volume ) {
                     $query = "UPDATE {$candles_table}__1D SET `volume` = $ticks_volume WHERE Date(`ts`) = '$date';";
-                    if ($mysqli->try_query($query))
+                    if ($mysqli->try_query($query)) {
                         $diff_pp = 100 * $ticks_volume / max(1, $block->target_volume);
-                        log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s__1D: daily candle %s volume upgraded to %s %.2f%% ", 
+                        log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s__1D: daily candle %s volume upgraded to %s %.1f%% ", 
                                     $candles_table, $date, format_qty($ticks_volume), $diff_pp);
+                    }
                     else
                         log_cmsg("~C31#WARN_FAILED_UPDATE:~C00 %s__1D: daily candle volume still unchanged", $candles_table);
                 }
