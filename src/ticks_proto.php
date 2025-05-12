@@ -125,7 +125,7 @@
             $full_unfilled = [];
 
             if (!$m_candles) {
-                log_cmsg("~C91 #WARN(LoadCandles):~C00 no 1m data for %s in MySQL", $c_table);
+                log_cmsg("~C91 #WARN(LoadCandles):~C00 no 1m data for %s [%s] in MySQL", $c_table, $this->key);
                 return;
             }            
 
@@ -837,7 +837,9 @@
                 if ($ticks_volume > $block->target_volume ) {
                     $query = "UPDATE {$candles_table}__1D SET `volume` = $ticks_volume WHERE Date(`ts`) = '$date';";
                     if ($mysqli->try_query($query))
-                        log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s__1D: daily candle volume upgraded in %s ", $candles_table, format_qty($ticks_volume));
+                        $diff_pp = 100 * $ticks_volume / max(1, $block->target_volume);
+                        log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s__1D: daily candle %s volume upgraded to %s %.2f%% ", 
+                                    $candles_table, $date, format_qty($ticks_volume), $diff_pp);
                     else
                         log_cmsg("~C31#WARN_FAILED_UPDATE:~C00 %s__1D: daily candle volume still unchanged", $candles_table);
                 }
@@ -1162,7 +1164,7 @@ SKIP_SCAN:
             }
             if (count($rows) > 0) {
                 $query .= implode(",\n", $rows);
-                if ($mysqli->try_query($query))
+                if ($mysqli->query($query)) // WARN: need ignore replica
                     log_cmsg("~C97#SCHEDULE:~C00 added %d / %d rows to schedule", $mysqli->affected_rows, count($rows));
             }
 

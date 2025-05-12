@@ -117,7 +117,7 @@
 
 
         protected function api_request(string $url, array $params, int $cache_for = 180): string { // REST API request with typical GET params.
-            global $rest_allowed_ts, $curl_resp_header;
+            global $rest_allowed_ts, $curl_resp_header, $curl_default_opts;
             $res = 'fail?'; 
             $this->cache_file_last = '';
             $fresh_rqs = [];
@@ -185,7 +185,7 @@
             $rq_start = pr_time();
             $this->last_api_wait = $rq_start - $t_start;
             $this->last_api_request = $rqs;
-            $opts = new CurlOptions();
+            $opts = clone $curl_default_opts;
             if ($this->current_interval < SECONDS_PER_DAY)   
                 $opts->wait_func = 'usefull_wait';     // need load WebSocket incoming data fast as possible, while intraday history download
             $res = curl_http_request($rqs, null, $opts);
@@ -214,9 +214,15 @@ SKIP_DOWNLOAD:
             if (!$latest || str_in($rqs_dbg, ':00:00') && $forward) {
                 $res = str_replace('],[', "],\n[", $res); // pretty formatting json
                 $res = str_replace('},{', "},\n{", $res); // pretty formatting json
-                file_put_contents($cache_file, $res);
-                $this->cache_file_last = $cache_file;
-                $this->rqs_cache_map[$key] = $res; // пригодиться для не отлаженного перезапроса данных
+                if (file_put_contents($cache_file, $res)) {
+                    $this->cache_file_last = $cache_file;
+                    $this->rqs_cache_map[$key] = $res; // пригодиться для не отлаженного перезапроса данных
+                }
+                else {
+                    $free = disk_free_space($cache_dir) / 1048576;
+                    log_cmsg("~C91 #ERROR:~C00 failed save data into cache file %s, size = %d. Disk free space: %.1f MiB", $cache_file, strlen($res), $free);
+                    unlink($cache_file);
+                }                
             }
             return $res;
         }
@@ -456,6 +462,12 @@ DUMP_SQL:
             $this->initialized = true;
             $this->init_count ++;
             // WARN: избыточные блоки не фильтруются здесь!
+        }
+
+        protected function InitScheduled(): int {
+            $params = "WHERE (ticker = '{$this->ticker}') AND (kind = '{$this->data_name}')";
+            $this->total_scheduled = sqli()->select_value('COUNT(*)', 'download_schedule', $params);
+            return 0;
         }
 
         protected function IsDynamicRequest(string $rqs): bool {
@@ -822,6 +834,7 @@ SKIP_CHECKS:
                             $first_keys = array_slice($mini_cache->keys, 0, 5);
                             log_cmsg("\t~C41~C97 #BLOCK_INVALID:~C40 ~C00 recovery request failed, no data covers %s, loaded data range: %s .. %s, first 5 keys imported: %s",
                                             strval($block), format_tms($oldest_ms), format_tms($newest_ms), json_encode($first_keys)); 
+                            $block->owner = null;                                            
                             $dump = var_export($block, true);                                            
                             log_cmsg("\t~C31#BLOCK_DUMP:~C00 %s", substr($dump, 0, 200));                                            
                             // die("DEBUG BREAK\n");
@@ -854,11 +867,7 @@ SKIP_CHECKS:
 
 
                         $cache_oldest = $cache->oldest_ms();
-                        $cache_newest = $cache->newest_ms();                        
-                        if (BLOCK_CODE::FULL != $block->code &  $block->Covered_by_ms($cache_oldest, $cache_newest) && count($block) > 0)  {
-                            $block->code = BLOCK_CODE::FULL; 
-                            $block->info = "cache {$cache->key} covered block by time";
-                        }
+                        $cache_newest = $cache->newest_ms();                                                
 
                         if ($block->loops >= 1500) {
                             $block->code = count($block) > 0 ? BLOCK_CODE::FULL : BLOCK_CODE::VOID; 
@@ -1102,11 +1111,16 @@ SKIP_CHECKS:
             }
 
             $month_ago = format_ts(time() - 30 * SECONDS_PER_DAY);
+
+
+            $id_ticker = $this->ticker_info->id_ticker;
+            if (null !== $id_ticker)
+                $this->data_flags = sqli()->select_value("load_{$this->data_name}", $this->tables['data_config'], "WHERE id_ticker = $id_ticker"); // Realtime update config
+
             // журнал скачивания предупреждает частые повторные попытки, если данные "не бьются" и считаются неполными. Остается некоторый шанс, что биржи по запросам на тикеты восстановят данные... 
             // так что очистка в следующей строке, позволит через месяц заново запросить данные
-            sqli()->try_query("DELETE FROM `download_history` WHERE (`ticker` = '{$this->ticker}') AND (`ts` < '$month_ago')");
-
-            $blocks_count = $this->BlocksCount();
+            sqli()->try_query("DELETE FROM `download_history` WHERE (`ticker` = '{$this->ticker}') AND (`ts` < '$month_ago')");            
+            $blocks_count = $this->InitScheduled();
             if (0 == $blocks_count && $this->data_flags & DL_FLAG_HISTORY) 
                 $this->InitBlocks($start, $end); // here can also defined last_block
             elseif ($blocks_count > 10)

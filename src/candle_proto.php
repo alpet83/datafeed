@@ -218,9 +218,7 @@
             $query = "ALTER TABLE {$this->table_name} ADD IF NOT EXISTS COLUMN `flags` UInt32 DEFAULT 0 AFTER `volume`";
             $ch_code = $this->table_create_code_ch;
             if ($chdb && strlen($ch_code) > 10) {
-                if (str_in($ch_code, 'ReplacingMergeTree(volume)'))
-                   log_cmsg("~C92#TABLE_OK:~C00 Used actual Engine ");
-                else  {
+                if (!str_in($ch_code, 'ReplacingMergeTree(volume)')) {
                     log_cmsg("~C31#WARN_UPGRADE:~C00 changing engine for table %s", $table_name);
                     $query = "REPLACE TABLE $table_name ENGINE  ReplacingMergeTree(volume) ORDER BY ts PARTITION BY toStartOfMonth(ts) AS SELECT * FROM $table_name";
                     $stmt = $chdb->write($query);
@@ -438,10 +436,6 @@
             $this->init_count ++;
 
             $mysqli_df = sqli_df();
-            $id_ticker = $this->ticker_info->id_ticker;
-            if (null !== $id_ticker)
-                $this->data_flags = $mysqli_df->select_value('load_candles', $this->tables['data_config'], "WHERE id_ticker = $id_ticker"); // update
-
             $block = $this->last_block;
             $day = date('Y-m-d'); // only today
             $col = 'UNIX_TIMESTAMP(ts)';
@@ -462,6 +456,45 @@
                 $this->total_avail_vol = $mysqli_df->select_value('SUM(volume)', $this->table_name); // оставить этот запрос здесь, чтобы пореже терзать БД 
         }
 
+        protected function InitScheduled(): int {
+            parent::InitScheduled();
+            // TODO: некрасивый обход блокировок, чтобы использовать общий код... надо переделывать
+            if (0 == $this->data_flags & DL_FLAG_HISTORY && $this->total_scheduled > 0) 
+                $this->ScanIncomplete(time());
+
+            $mysqli_df = sqli_df();
+            $mgr = $this->get_manager();
+
+            $this->ch_count_map = $this->LoadClickHouseStats(); // same stats as count_map in ScanIncomplete
+            // в таблице расписания могут быть запросы на синхронизацию свечей, после восстановления из тиков
+            $sync_batch = $mysqli_df->select_map('date,target_volume', 'download_schedule', "WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (target_volume > 0) LIMIT 100");            
+            if (count($sync_batch) > 0) {                
+                log_cmsg("~C33 #SYNC_BATCH:~C00 requested candles sync for %d days", count($sync_batch));
+                $dtl = array_keys($sync_batch);
+                $ptl = [];
+                foreach ($dtl as $dt) {
+                    $year = substr($dt, 0, 4);
+                    $part = $year > 2015 ? "p$year" : "parch"; // TODO: need detect real year of parch partition
+                    $ptl[$part] = max(0, count($ptl) - 1);
+                }
+                $ptl = implode(",", array_flip($ptl));
+                $dtl = implode("','", $dtl);                
+                $params = "PARTITION ($ptl)";
+                $params .= " WHERE DATE(ts) in ('$dtl') GROUP BY DATE(ts)";
+                $tmap = $mysqli_df->select_map('DATE(ts), COUNT(*) as count, SUM(volume) as volume', $this->table_name, $params, MYSQLI_OBJECT);
+                foreach ($sync_batch as $date => $tv) {
+                    $target = $tmap[$date] ?? false;
+                    if (is_object($target)) {
+                        $this->SyncClickHouse($date, $target);
+                        $mgr->ProcessWS(false);
+                    }
+                    else
+                        log_cmsg("~C31 #WARN_SKIP_SYNC:~C00 no source data for %s ", $date);
+                    if (!$mgr->active) break;
+                }            
+            }
+            return $this->BlocksCount();
+        }
 
         public function Elapsed () { 
             $newest = max($this->newest_ms, EXCHANGE_START);
@@ -653,15 +686,6 @@
                 $dump []= "VOLUME DIFF: expected {$block->target_volume}, achieved $volume, diff = ".format_qty($vdiff);
                 $dump []= "$price_info\n";
                 $chg_diff = $volume - $block->avail_volume;
-
-                // патч применяется для старых данных BitMEX, где не все понятно 
-                if ( abs($chg_diff) < $volume * 0.001 && 1 == $this->days_per_block && str_in($date, '201')) {                    
-                    if (sqli()->try_query("UPDATE {$this->table_name}__1D SET volume = $volume WHERE DATE(ts) = '$date' ")) { // BitMEX invalid data patch
-                        log_cmsg("~C31 #DAILY_PATCH:~C00 affected %d rows", sqli()->affected_rows);                                            
-                    }
-                    $this->daily_map[$last_day][CANDLE_VOLUME] = $volume;
-                }                
-
                 file_put_contents("$tmp_dir/bad-{$this->ticker}-$date.txt", implode("\n", $dump));                
             }
 
@@ -911,8 +935,7 @@
             $this->total_avail_blocks = count($count_map);
             
             $stats = $mysqli_df->select_map('date, day_start, day_end, count_minutes as count, volume_minutes as volume, volume_day, repairs', $this->stats_table, '', MYSQLI_OBJECT);
-            $retry_map = $mysqli_df->select_map('`date`,COUNT(ts)', 'download_history', "WHERE kind = 'candles' AND ticker = '{$this->ticker}' GROUP BY `date`");
-            $this->ch_count_map = $this->LoadClickHouseStats(); // same stats as count_map
+            $retry_map = $mysqli_df->select_map('`date`,COUNT(ts)', 'download_history', "WHERE kind = 'candles' AND ticker = '{$this->ticker}' GROUP BY `date`");            
 
             $dump = [];
             foreach ($count_map as $date => $row) 
@@ -945,7 +968,7 @@
             
             $today_t = floor_to_day(time());
             $verbose = 0;
-            if (0 == count ($count_map))
+            if (0 == count ($count_map) || $this->ticker == 'ltcusd')
                 $verbose = 3;
             
             $scan_start = time();    
@@ -1106,21 +1129,7 @@
                 elseif ($verbose > 2) 
                     log_cmsg("~C31#SKIP:~C00 ????");
             }
-
-            // в таблице расписания могут быть запросы на синхронизацию свечей, после восстановления из тиков
-            $sync_batch = $mysqli_df->select_map('date,target_volume', 'download_schedule', "WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (target_volume > 0) LIMIT 100");            
-            if (count($sync_batch) > 0)
-                log_cmsg("~C33 #SYNC_BATCH:~C00 requested candles sync for %d days", count($sync_batch));
-
-            foreach ($sync_batch as $date => $tv) {
-                if (isset($count_map[$date])) {
-                    $this->SyncClickHouse($date, $count_map[$date]);
-                    $mgr->ProcessWS(false);
-                }
-                else
-                    log_cmsg("~C31 #WARN_SKIP_SYNC:~C00 no source data for %s ", $date);
-            }            
-
+           
             ksort($fill_map);
             $fill_str = '~C43~C30[';
             foreach ($fill_map as $t => $count)  {
@@ -1160,11 +1169,10 @@
                 $query = "INSERT IGNORE INTO `download_schedule` (`date`, `kind`, `ticker`, `target_volume`, `target_close`) VALUES\n";
                 $query .= implode(",\n", $rows).";";
                 $this->total_scheduled = count($rows);
-                if ($mysqli_df->try_query($query))
+                if ($mysqli_df->query($query))  // WARN: need ignore replica
                     log_cmsg("~C93 #BLOCKS_SCHEDULED:~C00 added %d rows ", $mysqli_df->affected_rows);
             } 
-            else
-                $this->total_scheduled = $mysqli_df->select_value('COUNT(*)', 'download_schedule', "WHERE (ticker = '{$this->ticker}') AND (kind = 'candles')");
+            
 
             $this->blocks = array_values($this->blocks_map);          
             $this->blocks = array_slice($this->blocks, -$this->max_blocks);  // limit block count            
@@ -1178,47 +1186,53 @@
 
         protected function SyncClickHouse(string $day, object $target): float {
             global $chdb, $mysqli_df;            
+            $t_start = pr_time();
             $cleanup = "DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (`date` = '$day')";
-            $mysqli_df->query($cleanup); // only local, not touch replica
-
+            $mysqli_df->query($cleanup); // only local, not touch replica            
             if (!is_object($chdb) || isset($this->sync_map[$day])) return 0;            
             $this->sync_map[$day] = 1;
             $table_name = $this->table_name;
             $table_qfn = DB_NAME.".$table_name";            
             $avail_volume = 0;
+            $year = substr($day, 0, 4);
+            $part = $this->partitioned && $year > 2015 ? " PARTITION(p$year) " : '';  // TODO: need detect partition parch for old data            
+            $allow_cleanup = $this->data_flags & DL_FLAG_REPLACE;
+
             if (isset($this->ch_count_map[$day])) {
                 $rec = $this->ch_count_map[$day];
                 $avail_volume = $rec->volume;
-                $vdiff = $avail_volume - $target->volume;
+                $vdiff = $target->volume - $avail_volume; // положительная разница подразумевает, что в MySQL больше данных (или есть избыточные?)
                 $vdiff_pp = 100 * $vdiff / max($avail_volume, $target->volume, 0.1);
-                if ($rec->count == $target->count && abs($vdiff_pp) < 0.01) 
+                if ($target->count <= $rec->count && $vdiff_pp < 0.01)  // если цель выглядит не так жирно, как уже имеющиеся данные... тут возможно нечего обновлять, или можно даже данные восстановить из ClickHouse
                     return $rec->volume;                
                 else
                     log_cmsg("~C31#SYNC_NEED:~C00 for %s ClickHouse:$table_qfn, count %d vs MySQL %d  volume diff = %5.2f%% relative %s",
-                                    $day, $rec->count, $target->count, $vdiff_pp, format_qty($target->volume), );
+                                    $day, $rec->count, $target->count, $vdiff_pp, format_qty($target->volume) );
             }
 RESYNC:      
             $query = '-';
             $mgr = $this->get_manager();
             $tmp_dir = $mgr->tmp_dir;
-            try {               
-
-                if ($avail_volume > $target->volume)  {
+            $rows = [];
+            try {
+                if ($avail_volume > $target->volume && $allow_cleanup)  {
                     log_cmsg("~C31#PERF_WARN:~C00 cleanup excess data, removing all for day %s from ClickHouse table", $day);                    
                     $chdb->write("DELETE FROM $table_name WHERE DATE(ts) = '$day'"); // remove old data
                 }
-
+                
                 $mysqli_df = sqli_df();
                 $cols = 'ts, open, close, high, low, volume, flags';
-                $source = $mysqli_df->select_rows($cols, $table_name, "WHERE DATE(ts) = '$day'", MYSQLI_ASSOC);
+                
+                $source = $mysqli_df->select_rows($cols, $table_name, "$part WHERE DATE(ts) = '$day'", MYSQLI_ASSOC);
                 if (!is_array($source) || 0 == count($source)) {
                     log_cmsg("~C31#WARN_EMPTY_RES:~C00 no data for %s in MySQL.$table_name: %s", $day, $mysqli_df->error);
                     return 0;
                 }
-
+                $elps = [];
+                $elps ['load'] = round(pr_time() - $t_start, 2);
+                $t_start = pr_time();
                 $cols = str_replace(' ', '', $cols);
-                $cl = explode(',', $cols);
-                $rows = [];
+                $cl = explode(',', $cols);                
                 $volume = 0;
                 foreach ($source as $row) {
                     $sr = $mysqli_df->pack_values($cl, $row, "'");
@@ -1227,10 +1241,11 @@ RESYNC:
                 }
                 $query = "INSERT INTO $table_name ($cols) VALUES\n ";
                 $query .= implode(",\n", $rows)."\n";
-                $stmt = $chdb->write($query);                              
+                $stmt = $chdb->write($query);            
+                $elps ['store'] = round(pr_time() - $t_start, 2);                                  
                 if (is_object($stmt) && !$stmt->isError()) {
                     $stat = LoadQueryStats($chdb, $table_qfn, 1);
-                    log_cmsg("~C93#SYNC_COMPLETE:~C00 for %s ClickHouse:.$table_qfn, stats: %s ", $day, json_encode($stat));                    
+                    log_cmsg("~C93#SYNC_COMPLETE:~C00 from MySQL %s [%s] to ClickHouse:$table_qfn, time usage %s, stats: %s ", $part, $day, json_encode($elps), json_encode($stat));                    
                     return $volume;
                 }
                 else
@@ -1239,7 +1254,8 @@ RESYNC:
             catch (Exception $E) {
                 $fname = "$tmp_dir/failed_sync-{$this->ticker}.sql";
                 file_put_contents($fname, $query);
-                log_cmsg("~C91#EXCEPTION(SyncClickHouse):~C00 first row %s (full query in %s), message %s from: %s", $rows[0], $fname,
+                $first = $rows[0] ?? '<nope>';
+                log_cmsg("~C91#EXCEPTION(SyncClickHouse):~C00 first row %s (full query in %s), message %s from: %s", $first, $fname,
                             $E->getMessage(), $E->getTraceAsString());
             }  
             return 0;         
