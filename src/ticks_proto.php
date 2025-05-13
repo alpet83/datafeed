@@ -19,12 +19,17 @@
          */
         public     array $candle_map = [];  
 
-
         public     $daily_candle = null;  // для хранения дневной свечи
         public     $minutes_volume = 0; // for reconstruction need check
 
         public     array $refilled_vol = [];
         public     array $unfilled_vol = [];
+        
+        public function __construct(BlockDataDownloader|null $loader, int $start = 0, int $end = 0) {
+            parent::__construct($loader, $start, $end);
+            $this->min_fills = 10000000; // prevent false positive in IsFullFilled
+        }
+
 
         public function __toString() {
             $res = parent::__toString();
@@ -32,6 +37,18 @@
             $res .= ', UF: '.count($this->unfilled_vol); 
             return $res;
         }
+
+        public function newest_ms(): int {
+            if (0 == count($this->cache_map)) return parent::newest_ms();
+            $last = $this->last();
+            return is_array($last) ? $last[TICK_TMS] : 0;            
+        }
+
+        public function oldest_ms(): int {
+            if (0 == count($this->cache_map)) return parent::oldest_ms();
+            $first = $this->first();
+            return is_array($first) ? $first[TICK_TMS] : 0;            
+        }        
 
         public  function AddRow(int $tms, bool $buy, float $price, float $amount, string $trade_no, string $key = null) {
             $rec = [$tms];
@@ -74,8 +91,12 @@
         }
 
         public function IsFullFilled(): bool {            
-            if (0 == count($this->unfilled_vol) && count($this->candle_map) > 0) return true;
-            return parent::IsFullFilled();
+            if (0 == count($this->unfilled_vol)) return true;
+            $sum = 0;
+            foreach ($this->unfilled_vol as $v) 
+                if ($v > 0) $v += $sum;
+
+            return $v < $this->target_volume * 0.0001;
         }
 
         public function LeftToDownload(): float {
@@ -291,10 +312,16 @@
         } 
 
         public function UnfilledAfter(): int {
+            $newest = $this->newest_ms();
             foreach ($this->unfilled_vol as $key => $v)
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key);
-                    if ($this->LoadedForward ($tms, 5000)) continue; // предотвращение повторных результатов
+                    if ($this->LoadedForward ($tms, 100)) {
+                        $elps = $newest - $tms;
+                        if ($elps > 0 && $elps < 60000)
+                            return $newest; // intra scan
+                        continue; // предотвращение повторных результатов
+                    }
                     if ($tms >= $this->lbound_ms) return $tms;
                     log_cmsg("~C91#ERROR(UnfilledAfter):~C00 for minute key %d produced timestamp %s ", $key, format_tms($tms));
                     break;
@@ -305,10 +332,16 @@
 
         public function UnfilledBefore(): int {         
             $rv = array_reverse($this->unfilled_vol, true); // need maximal key
+            $oldest = $this->oldest_ms();
             foreach ($rv as $key => $v) {                
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key + 1); // download need from next minute
-                    if ($this->LoadedBackward($tms, 5000)) continue; // предотвращение повторных результатов
+                    if ($this->LoadedBackward($tms, 100)) {
+                        $elps = $oldest - $tms; 
+                        if ($elps > 0 && $elps < 60000)  // минута ещё не просканирована?
+                            return $oldest; // intra scan
+                        continue; // предотвращение повторных результатов
+                    }
                     return $tms;
                 }
             }
@@ -558,8 +591,7 @@
             if ($block->code == $block->reported) return;
             $this->loaded_blocks ++;                           
             $block->reported = $block->code;
-            $filled = '~C43~C30['.$block->format_filled().']~C00';                    
-            $lag_left = $block->min_avail - $block->lbound;
+            $filled = '~C43~C30['.$block->format_filled().']~C00';                                
             $index = $block->index;
             if ($index >= 0 && $lag_left > 60)
                 $block->FillDummy();
@@ -591,9 +623,7 @@
             $s_info = 'postponed for verify/retry, ';
 
             $attempts = sqli()->select_value('COUNT(*)', 'download_history', 
-                                              "WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (date = '$day')"); 
-
-                                               
+                                              "WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (date = '$day')");                                                
         
             $db_diff = $saldo_volume - $check_volume;                 
             $db_diff_pp = 100 * $db_diff / max($check_volume, $saldo_volume, 0.01);
@@ -623,8 +653,8 @@
             $inaccuracy = 0.01; // погрешность суммирования float с очень разным порядком 0.01%
             if (abs($diff_pp) < $this->volume_tolerance && ($recv > 0 || $diff_pp + $inaccuracy >= 0)) {
                 $whole_load = true;
-                log_cmsg("$prefix($symbol/$index/$attempts):~C00 %s, lag left %5d, %s,\n\t\ttarget_volume reached %s in %d ticks, block summary %s, filled in session: %s ", 
-                            strval($block), $lag_left, $block->info, format_qty($check_volume), $count, json_encode($check), $filled);    
+                log_cmsg("$prefix($symbol/$index/$attempts):~C00 %s, attempts %d, %s,\n\t\ttarget_volume reached %s in %d ticks, block summary %s, filled in session: %s ", 
+                            strval($block), $attempts, $block->info, format_qty($check_volume), $count, json_encode($check), $filled);    
                 if (-1 == $block->index)
                      $this->RecoveryCandles($block, $check_volume);  // upgrade latest
                 
@@ -635,8 +665,8 @@
                     $problem = 'VOID';
                 $load_result = sprintf('%s diff %.2f%%', $problem, $diff_pp);
 
-                log_cmsg("~C04{$prefix}_$problem($symbol/$index/$attempts):~C00 %s, lag left %d, %s, target_volume reached %s (saldo %s) instead %s daily (diff %.2f%%) and %s minutes,\n\t\t $s_info block summary %s, filled in session: %s ", 
-                            strval($block), $lag_left, $block->info, 
+                log_cmsg("~C04{$prefix}_$problem($symbol/$index/$attempts):~C00 %s, attempts %d, %s, target_volume reached %s (saldo %s) instead %s daily (diff %.2f%%) and %s minutes,\n\t\t $s_info block summary %s, filled in session: %s ", 
+                            strval($block), $attempts, $block->info, 
                                 format_qty($check_volume), format_qty($saldo_volume),
                                 format_qty($block->target_volume), $diff_pp, format_qty($block->minutes_volume),
                                 json_encode($check), $filled);                    

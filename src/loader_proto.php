@@ -47,9 +47,16 @@
         $b = $t;
     }
 
+    function ceil_to(float $f, float $step): float {
+        return ceil($f / $step) * $step;
+    }
+    
+    function floor_to(float $f, float $step): float {
+        return floor($f / $step) * $step;
+    }
 
     function floor_to_day(int $t): int {
-        return floor($t / SECONDS_PER_DAY) * SECONDS_PER_DAY;
+        return floor_to($t, SECONDS_PER_DAY);
     }
 
 

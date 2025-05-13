@@ -43,6 +43,7 @@
             $this->CreateTables();                
             $this->RegisterSymbol('ticks', $this->pair_id);                
             $this->default_limit = 1000;
+            $this->blocks_at_once = 1;
         }
 
         public function HistoryFirst(): bool|int {            

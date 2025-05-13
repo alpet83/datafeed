@@ -1,4 +1,5 @@
 <?php
+    const MIN_STEP_MS = 100;    
 
     class DataBlock implements Countable, ArrayAccess {
 
@@ -22,6 +23,9 @@
 
         protected  array $history_bwd = [];
         protected  array $history_fwd = [];
+
+        public  $prev_after = -1;
+        public  $prev_before = -1;
 
         public  int $duplicates = 0;
         public  int $fills = 0;
@@ -281,7 +285,7 @@
             return $this->target_volume - $this->SaldoVolume();
         }
 
-        public function LoadedBackward(int $tms, int $near = 5000, bool $add = false): bool {
+        public function LoadedBackward(int $tms, int $near = MIN_STEP_MS, bool $add = false): bool {
             if (isset($this->history_bwd[$tms])) return true;
             if ($add) 
                 return $this->history_bwd[$tms] = true;
@@ -292,7 +296,7 @@
             return $add;
         }
 
-        public function LoadedForward(int $tms, int $near = 5000, bool $add = false): bool {
+        public function LoadedForward(int $tms, int $near = MIN_STEP_MS, bool $add = false): bool {
             if (isset($this->history_fwd[$tms])) return true;
             if ($add) 
                 return $this->history_fwd[$tms] = true;

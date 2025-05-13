@@ -603,16 +603,15 @@ SKIP_CHECKS:
             
             $round_max = 60000; 
             $last_density = 0;
+
+            $prev_after = -1;
+            $prev_before = -1;
             try {
             // блок загружается справа - налево, заполняясь с хвоста
                 while ($before_ms > $lbound_ms || $lag_right > 300) {
                     //  =============================================================================================                           
                     $now = time();
-                    if ($block->loops >= 1500) {
-                        $this->last_error = "loop count reach {$block->loops}, probably infinite loop";
-                        break;
-                    }                   
-
+                    
                     $minute = date('i') * 1;
                     if (!$mgr->active || $minute >= 58 ) {
                         $this->last_error = "script going to termination";
@@ -622,9 +621,20 @@ SKIP_CHECKS:
                     $reverse = true;
                     $heavy_data = $last_density >= $this->default_limit;
 
+                    $after_ms = $block->UnfilledAfter();  
+                    $before_ms = $block->UnfilledBefore(); 
+                    $round_step = $round_max;
+
                     // если в предыдущую минуту было загружено данных с избытком, нужно небольшими шагами двигаться по истории внутри той-же минуты 
-                    $after_ms  = $heavy_data ? $after_ms + 10000 : $block->UnfilledAfter();  
-                    $before_ms = $heavy_data ? $before_ms - 10000 : $block->UnfilledBefore(); 
+                    if ($heavy_data) {
+                        $step = $after_ms - $prev_after;
+                        if (abs($step ) == $round_max || 0 == $step)                            
+                            $after_ms  =  $block->newest_ms();  
+                        $step = $before_ms - $prev_before;
+                        if (abs($step) == $round_max || 0 == $step)
+                            $before_ms =  $block->oldest_ms();                        
+                        $round_step =  $coef >= 60 ? MIN_STEP_MS : 1000; // в самых экстремальных плотностях, надо спускаться на уровень ниже секунды!
+                    }                     
 
                     if ($before_ms < EXCHANGE_START) { // ещё миллион таких костылей добавлю, и заработает...
                         log_cmsg("~C91 #FINAL_BLOCK_DUMP:~C00 %s", json_encode($block, JSON_PRETTY_PRINT));
@@ -634,25 +644,33 @@ SKIP_CHECKS:
                     // коррекция курсора, по данным в кэше
                     // && ($cache->Covers($block->min_avail) || $cache->Covers($block->max_avail))
                     if (count($cache) > 0 ) {   
-                        // если очень много данных в каждой минутке, округление шага надо снижать. Вопрос в критерии                     
-                        $round_step = $heavy_data ? 10000 : $round_max;                       
+                        // если очень много данных в каждой минутке, округление шага надо снижать. Вопрос в критерии                                             
                         $oldest_ms = $cache->oldest_ms();
                         $newest_ms = $cache->newest_ms();                        
+
                         // вариант контролирующей оптимизации: отталкиваться от времени крайней записи в кэше (слева и справа соответственно). 
-                        if ($heavy_data)  {                           
-                            $pp = 100 * $last_density / $this->default_limit;
-                            log_cmsg("\t~C33~C04#HEAVY_DATA:~C00 last density overlap step capacity for %.1f%%, using shift inside minute. Input cursors: %s .. %s ",
-                                             $pp - 100, format_tms($before_ms), format_tms($after_ms)); 
-                            $after_ms  = min($after_ms , $newest_ms);                                                                        
-                            $before_ms = max($oldest_ms, $before_ms);                         
+                        if ($heavy_data)  {              
+                            $coef = $last_density / $this->default_limit;                                                                     
+                            $tag = $coef > 60 ? '#ULTRA_HEAVY_DATA' : '#HEAVY_DATA';
+                            $pp = 100 * $coef;
+                            $after_ms  = floor_to($after_ms, $round_step );
+                            $before_ms = ceil_to($before_ms, $round_step );                                       
+
+
+                            log_cmsg("\t~C33~C04$tag:~C00 last density overlap step capacity for %.1f%%, using shift inside minute. Round step %d, Input cursors: %s .. %s ",
+                                             $pp - 100, $round_step, format_tms($before_ms), format_tms($after_ms));                                              
+                            if ($after_ms == $prev_after && $newest_ms < $block->rbound_ms) // странно, если сработает...
+                                $after_ms = $newest_ms;
+                            if ($before_ms == $prev_before && $oldest_ms > $block->lbound_ms)
+                                $before_ms = $oldest_ms;                                
+
+                            
                         } else {
                             // перезапросы одних и тех-же данных из-за плохой вертикальной валидации (минутки и тики Bitfinex), замедляют процесс слишком сильно. Сдвиг окна исчисляется минутами, хотя загружаются всякий раз - часы
                             if ($cache->duplicates >= count($cache)) {
                                 $after_ms  = max($after_ms, $newest_ms);
-                                $before_ms = min($before_ms, $oldest_ms);
-                            }
-                            $after_ms  = floor($after_ms / $round_step ) * $round_step;
-                            $before_ms = ceil($before_ms / $round_step ) * $round_step;                                    
+                                $before_ms = min($before_ms, $oldest_ms);                            
+                            }                            
                         }
 
                         if ($before_ms < EXCHANGE_START) {
@@ -869,7 +887,7 @@ SKIP_CHECKS:
                         $cache_oldest = $cache->oldest_ms();
                         $cache_newest = $cache->newest_ms();                                                
 
-                        if ($block->loops >= 1500) {
+                        if ($block->loops >= 15000) {
                             $block->code = count($block) > 0 ? BLOCK_CODE::FULL : BLOCK_CODE::VOID; 
                             $block->info = "deadlock detected, loop count {$block->loops}";
                         }
@@ -889,18 +907,17 @@ SKIP_CHECKS:
                         $cache_info = 'invalid/void';
                         if ($cache_oldest <= $cache_newest)
                             $cache_info = format_color("%s..%s = %.1f min", color_ts($cache_oldest / 1000), color_ts($cache_newest / 1000), 
-                                                                          ($cache_newest - $cache_oldest) / 60000);
-                        
-
+                                                                          ($cache_newest - $cache_oldest) / 60000);                                                
                         $pp = 100;
                         if ($block->target_volume > 0)
                             $pp = 100 - 100 * $left_volume / $block->target_volume;                        
 
-                        log_cmsg("~C96\t\t#BLOCK_SUMMARY({$block->loops})~C00: %5d $data_name downloaded (%7d saldo, %7d in cache) with density %4.1f / minute, accumulated range [$cache_info], block stored range [%s..%s], left vol %-7s, progress %.1f%%", 
+                        log_cmsg("~C96\t\t#BLOCK_SUMMARY({$block->loops})~C00: %5d $data_name downloaded (%7d saldo, %7d in cache) with density %4.1f / minute, accumulated range [$cache_info], block stored range [%s..%s]", 
                                     count($data), $added, $cache_size, $last_density,
                                     color_ts( $block->min_avail),                                
-                                    color_ts( $block->max_avail), 
-                                    format_qty($left_volume), $pp);
+                                    color_ts( $block->max_avail),);                 
+                        if (0 == $block->loops % 10)                  
+                            log_cmsg("~C96\t\t#BLOCK_PROGRESS:~C00 %s, left vol %-7s, progress %.3f%%", strval($block), format_qty($left_volume), $pp);
                     }   // if mini_cache loaded 
                     elseif (is_array($data) ) {
                         if ($block->attempts_bwd > 2 && $block->attempts_fwd > 2) {
@@ -916,7 +933,15 @@ SKIP_CHECKS:
                     $block->loops ++;             
                     $cache->loops ++;                                            
                     
-                    $mgr->ProcessWS(false); // обновления мимо кэша!
+                    // $mgr->ProcessWS(false); // обновления мимо кэша!
+                    $prev_after = $after_ms;
+                    $prev_before = $before_ms;
+
+
+                    if (count($cache) >= 100000) { // TODO: need config parameter
+                        $this->FlushCache();
+                        // TODO: чтобы не падало из-за нехватки памяти, надо вырезать избыточные строки у block, оставляя по 1 на каждую секунду.
+                    }                     
                     
                     $last_ts = '';
                     if ($block->max_avail >= $rtm_min || $index < 0)  {                 
@@ -943,7 +968,7 @@ SKIP_CHECKS:
                 $block->code = BLOCK_CODE::INVALID;                
             }
             if (count($cache) > 0)
-                $this->OnCacheUpdate($block, $cache); // контрольное обновление, полными данными
+                $this->OnCacheUpdate($block, $cache); // контрольное обновление, данными что остались после последнего сброса
             return intval($added);
         }
 
@@ -957,10 +982,10 @@ SKIP_CHECKS:
 
             $tag = $block->index < 0 ? '~C40' : '~C04';
             if ($backward_scan)
-                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s before = %s, attempts <<< %d", 
+                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s before =~C40 %s~C49, attempts <<< %d", 
                                 $rqs_dbg, color_ts($tss), $block->attempts_bwd);                       
             else
-                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s after = %s, attempts >>> %d", 
+                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s after =~C40 %s~C49, attempts >>> %d", 
                                 $rqs_dbg, color_ts($tss), $block->attempts_fwd);
                                 
             // TODO: ttl config table                                
@@ -1233,8 +1258,7 @@ SKIP_CHECKS:
             $prev_day = $this->cache->firstKey();
 
             // download history by mapping
-            while ($index >= 0 && $big_loads < $this->blocks_at_once && $mgr->active && !$this->cycle_break) {
-                usefull_wait(100000);
+            while ($index >= 0 && $big_loads < $this->blocks_at_once && $mgr->active && !$this->cycle_break) {                
                 $block = $this->blocks[$index];
                 $key = intval($block->code->value);                                
                 if ($key < 0 || $block->index < 0) {
@@ -1276,6 +1300,12 @@ SKIP_CHECKS:
                     $code_map[$key] ++;                    
                 
                 $index --;        
+                if (count($block) >= 500000) {
+                    log_cmsg("~C103~C30 #VERY_FAT_BLOCK:~C00~C40 %s has too much records, breaking...", 
+                                strval($block));
+                    break;
+                }
+
                 $elps = time() - $t_start;
                 if ($elps >= $this->cycle_time * 0.85 || str_in($this->last_error, 'timeouted')) {
                     $this->cycle_break = true;
