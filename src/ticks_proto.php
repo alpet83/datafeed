@@ -90,6 +90,40 @@
             return count($this->cache_map);
         }
 
+        public function FormatProgress(): string {
+            $res = parent::FormatProgress();
+            if (count($this->unfilled_vol) < 10) {
+                $vals = [];
+                // may display unfilled seconds count in unfilled minutes?
+                foreach ($this->unfilled_vol as $m => $v)
+                    $vals []= sprintf("%d:%.3f", $m, $v);
+                return '~C95'.$res.'~C00 unfilled: ~C93'.implode(', ', $vals);
+            }            
+            $ufcount = array_pad([], 24, 0); // count unfilled per hour
+            foreach ($this->unfilled_vol as $m => $v) {
+                $h = floor($m / 60);                
+                $ufcount[$h] ++;
+            }
+            $res .= '~C00 unfilled map:~C43~C34 ';
+
+            foreach ($ufcount as $count) {
+                // ▒▓█□○◦ 
+                if (0 == $count) 
+                    $res .= ' '; 
+                elseif ($count == 1)
+                    $res .= '□';
+                elseif ($count < 20)
+                    $res .= '░';
+                elseif ($count < 30)
+                    $res .= '▒';
+                elseif ($count < 60)
+                    $res .= '▓';
+                else
+                    $res .= '█';                
+            }
+            return $res;
+        }
+
         public function IsFullFilled(): bool {            
             if (0 == count($this->unfilled_vol)) return true;
             $sum = 0;
@@ -167,7 +201,7 @@
                 $fake = 0;            
                 for ($m = 0; $m < 1440; $m ++) {
                     if (isset($full_unfilled[$m])) continue;
-                    $full_unfilled[$m] = 0.001;
+                    $full_unfilled[$m] = 0.00001;
                     $this->candle_map[$m] = [0, 0, 0, 0, 0.0]; // fake candle
                     $this->refilled_vol[$m] = 0;
                     $fake ++;
@@ -313,16 +347,27 @@
 
         public function UnfilledAfter(): int {
             $newest = $this->newest_ms();
+            $newest = floor($newest / MIN_STEP_MS) * MIN_STEP_MS;
+            if ($this->LoadedForward($newest, 100))
+                $newest = 0; // not available as repeat
+
             foreach ($this->unfilled_vol as $key => $v)
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key);
                     if ($this->LoadedForward ($tms, 100)) {
                         $elps = $newest - $tms;
-                        if ($elps > 0 && $elps < 60000)
+                        if ($elps > 0 && $elps < 60000 )
                             return $newest; // intra scan
                         continue; // предотвращение повторных результатов
-                    }
-                    if ($tms >= $this->lbound_ms) return $tms;
+                    }                    
+                    $back = $tms - 60000;
+                    $eom  = $tms + 60000;
+                    if ($tms > $newest && $newest > $back && $newest < $eom) 
+                        $tms = $newest;
+
+                    // if ($tms <= $this->prev_after) $tms = $this->prev_after + 100;  // последний костыль надежды
+
+                    if ($tms >= $this->lbound_ms) return $this->prev_after = $tms;                    
                     log_cmsg("~C91#ERROR(UnfilledAfter):~C00 for minute key %d produced timestamp %s ", $key, format_tms($tms));
                     break;
                 }
@@ -342,7 +387,7 @@
                             return $oldest; // intra scan
                         continue; // предотвращение повторных результатов
                     }
-                    return $tms;
+                    return $this->prev_before = $tms;
                 }
             }
             return $this->get_rbound_ms(); // full reload suggest
@@ -591,10 +636,8 @@
             if ($block->code == $block->reported) return;
             $this->loaded_blocks ++;                           
             $block->reported = $block->code;
-            $filled = '~C43~C30['.$block->format_filled().']~C00';                                
+            $filled = '~C43~C30['.$block->FormatFilled().']~C00';                                
             $index = $block->index;
-            if ($index >= 0 && $lag_left > 60)
-                $block->FillDummy();
             $this->last_error = '';
             $tmp_dir = $this->get_manager()->tmp_dir.'/blocks';
             check_mkdir($tmp_dir);
@@ -720,6 +763,8 @@
                             $this->ticker, $count, $check_volume, $load_result);
             sqli()->try_query($query); // по сути это журнал загрузки. Сверка с ним, позволит избежать повторов без ручной очистки                                            
             $block->Reset($whole_load); // clean memory
+            if ($whole_load) 
+                shell_exec("rm {$this->cache_dir}/*.json"); // remove files from prevous sessions            
         }
 
         protected function OnCacheUpdate(DataBlock $default, DataBlock $cache) {         

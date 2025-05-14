@@ -105,6 +105,7 @@
         protected   $ws_empty_reads = 0;
         protected   $ws_events_cnt = 0;           // simple counter
         protected   $ws_reconnects = 0;
+        protected   $ws_records_cnt = 0; 
         protected   $ws_recv_bytes = 0;           // bytes counter 
         protected   $ws_recv_last = 0;           // last time of data received
         protected   $ws_recv_packets = 0;         // packets counter
@@ -435,8 +436,8 @@
             $elps = $now - $this->ws_report_t;            
             if ($elps >= 300) {
                 $this->ws_report_t = $now;
-                log_cmsg("~C93#WS_REPORT:~C00 events = %d, data = %.1f KiB in %d packets, imports = %d ", 
-                         $this->ws_events_cnt, $this->ws_recv_bytes / 1024, $this->ws_recv_packets, $this->ws_imports);
+                log_cmsg("~C93#WS_REPORT:~C00 events = %d, records = %d, data = %.1f KiB in %d packets, imports = %d ", 
+                         $this->ws_events_cnt, $this->ws_records_cnt, $this->ws_recv_bytes / 1024, $this->ws_recv_packets, $this->ws_imports);
             }
 
             if (!$this->ws->isConnected()) {         
@@ -487,6 +488,8 @@
             
             try {            
                 $avail = $ws->unreaded();
+                if (0 == $avail) return 0;
+                
                 $t_start = pr_time();
                 $recv = $ws->receive();
                 $opcode = $ws->getLastOpcode();
@@ -512,6 +515,7 @@
                         log_cmsg("~C91 #WARN~C00: recv decoded as %s ", gettype($data));
                         return 0;
                     }  
+                    $this->ws_records_cnt ++;
                     $this->ProcessRecord($data);                     
                     return 1;
                 } 
@@ -562,7 +566,7 @@
                     $this->ws_empty_reads ++;
                     
                 if ($this->ws_empty_reads > 4 && $ping_elps > 120) {          
-                    $this->ReconnectWS("receive fails too much: $msg");
+                    $this->ReconnectWS("receive fails too much, for $avail bytes: $msg");
                 } // reconnect typical 
             } // exception handle
             return 0;

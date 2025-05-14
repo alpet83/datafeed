@@ -50,7 +50,7 @@
     function ceil_to(float $f, float $step): float {
         return ceil($f / $step) * $step;
     }
-    
+
     function floor_to(float $f, float $step): float {
         return floor($f / $step) * $step;
     }
@@ -161,6 +161,7 @@
         public      $ws_newest = 0;     // лучшее время данных полученных через ws
         public      $ws_sub = null;    // ws subscription desc or true 
         public      $ws_channel   = 0; // id for WebSocket sub         
+        public      $ws_sub_count = 0; // subscription attempts
         public      $ws_sub_start = 0; // last subscription attempt
 
         public      $ws_log_file = '/dev/null';

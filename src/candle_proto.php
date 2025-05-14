@@ -570,7 +570,7 @@
             if ($block->code == $block->reported) return;            
             $this->loaded_blocks ++;                       
             $block->reported = $block->code;
-            $filled = '~C43~C30['.$block->format_filled(60).']~C00';                    
+            $filled = '~C43~C30['.$block->FormatFilled(60).']~C00';                    
             $lag_left = $block->min_avail - $block->lbound;
             $index = $block->index;
             if ($index >= 0 && $lag_left > 60) {                

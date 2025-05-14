@@ -9,9 +9,12 @@
         protected $id_counter = 0;
 
         public   $requests = [];
+        
 
         public function __construct(string $stream, array $params, mixed $config = false) {
-            $url = "wss://data-stream.binance.vision/ws/$stream".http_build_query($params);
+            $params = http_build_query($params);            
+            $url = str_in($stream, 'trades') ? 'wss://stream.binance.com/ws/' : 'wss://data-stream.binance.vision/ws/';
+            $url .= "$stream$params";
             log_cmsg ("~C97#WS_CREATE:~C00 using %s", $url);
             parent::__construct($url, $config);                                 
         }  

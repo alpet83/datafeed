@@ -76,6 +76,8 @@
         protected   $rqs_cache_map = []; // [md5(rqs)] = API response
         protected   $cache_hit = false;
 
+        protected   $cache_dir = ''; 
+
         protected   $last_api_headers = ''; //  last API response headers for ratelimit control
         protected   $last_api_request = ''; // last API request by api_request function
         protected   $last_api_rqt = 0.0; // last API request time in seconds
@@ -148,15 +150,13 @@
                     return $res;
                 }
             }          
-            $cache_dir = str_replace($this->rest_api_url, '', $url);
-            $cache_dir = str_replace('//', '/', "/cache/$cache_dir"); // if possible - mount zram compressed lz4
-            
-            check_mkdir($cache_dir);
-            $cache_file = "$cache_dir/$key.json";
+
+            $cache_dir = $this->cache_dir;
+            $cache_file = (!empty($cache_dir)) ? "$cache_dir/$key.json" : false;
             $today = date('Y-m-d');
             // запросы от сегодняшнего дня - не кэшировать
             $latest = str_in($rqs_dbg, $today) || $this->IsDynamicRequest($rqs_dbg) || $cache_for <= 0;  
-            if (!$latest && file_exists($cache_file)) { // для отладки пока без ограничения времени жизни кэша, это заблокирует обновление для динамических URL!
+            if (!$latest && $cache_file && file_exists($cache_file)) { // для отладки пока без ограничения времени жизни кэша, это заблокирует обновление для динамических URL!
                 $res = file_get_contents($cache_file);
                 $this->cache_file_last = $cache_file;
                 $data = json_decode($res);                
@@ -209,6 +209,8 @@ SKIP_DOWNLOAD:
             if (strlen($res) < 256)
                 $cache_for = 3600; // small response, cache for 1 hour
             $this->last_requests [$t_now + $cache_for] = $rqs; // save as non-failed            
+            if (!$cache_file) return $res;
+
             $today = date('Y-m-d'); // за текущий день слишком много запросов
             $forward = str_in($rqs_dbg, 'reverse=false') || str_in($rqs_dbg, 'sort=1');
             if (!$latest || str_in($rqs_dbg, ':00:00') && $forward) {
@@ -553,6 +555,12 @@ DUMP_SQL:
                 log_cmsg("~C91 #ERROR:~C00 block range to invalid (too big), cleanup disabled: %s", strval($block));
                 return 0;
             }
+            
+            $cache_dir = "/cache/{$this->data_name}/{$this->ticker}_{$block->key}";
+            $cache_dir = str_replace('//', '/', $cache_dir); // if possible - mount zram compressed lz4            
+            check_mkdir($cache_dir);
+            $this->cache_dir = $cache_dir;
+
 SKIP_CHECKS:            
 
             $ps = $block->db_need_clean ? 'RELOAD' : 'DOWNLOAD';
@@ -702,7 +710,7 @@ SKIP_CHECKS:
                             $after_ms = $this->TimeStampDecode($from_ts, 3); 
                             log_cmsg("~C04~C93#TAIL_DOWNLOAD_FWD({$block->loops}):~C00 right block side after %s, next attempt planned at %s", color_ts($from_ts), color_ts($block->next_retry));
                         }
-                        elseif ($block->loops <= 0 && !$block->LoadedBackward($before_ms, 30000)) {  
+                        elseif ($block->loops <= 0 && !$block->LoadedBackward($before_ms)) {  
                             $reverse = true;
                             $before_ms = time_ms();                            
                             log_cmsg("~C04~C93#TAIL_DOWNLOAD_BWD({$block->loops}):~C00 right block side before now");
@@ -712,7 +720,7 @@ SKIP_CHECKS:
                     }
                     elseif ( $block->Covers_ms($after_ms) && $block->attempts_fwd < 3) { // $block->rbound - $block->max_avail > 300 &&                        
                         // выполнение этого кода очень желательно, чтобы история ложилась в БД последовательно хотя-бы внутри дня. Это оптимизирует доступ для волатильной истории
-                        if ($block->LoadedForward($after_ms)) {
+                        if ($block->LoadedForward($after_ms, MIN_STEP_MS / 2)) {
                             $block->attempts_fwd ++;
                             $txt = 'RELOAD';
                         }                        
@@ -724,7 +732,7 @@ SKIP_CHECKS:
                     }                                         
                     elseif ( $block->Covers_ms($before_ms) && $block->attempts_bwd < 3 && count($block) > 0) {  // $block->max_avail - $block->lbound > 300 &&
                         // загрузка справа налево, при нормальных данных этого не должно случаться
-                        if ($block->LoadedBackward($before_ms)) {
+                        if ($block->LoadedBackward($before_ms, MIN_STEP_MS / 2)) {
                             $block->attempts_bwd ++;                        
                             $txt = 'RELOAD';
                         }
@@ -908,16 +916,15 @@ SKIP_CHECKS:
                         if ($cache_oldest <= $cache_newest)
                             $cache_info = format_color("%s..%s = %.1f min", color_ts($cache_oldest / 1000), color_ts($cache_newest / 1000), 
                                                                           ($cache_newest - $cache_oldest) / 60000);                                                
-                        $pp = 100;
-                        if ($block->target_volume > 0)
-                            $pp = 100 - 100 * $left_volume / $block->target_volume;                        
-
+                        $pp = $block->FormatProgress();
                         log_cmsg("~C96\t\t#BLOCK_SUMMARY({$block->loops})~C00: %5d $data_name downloaded (%7d saldo, %7d in cache) with density %4.1f / minute, accumulated range [$cache_info], block stored range [%s..%s]", 
                                     count($data), $added, $cache_size, $last_density,
                                     color_ts( $block->min_avail),                                
-                                    color_ts( $block->max_avail),);                 
+                                    color_ts( $block->max_avail));                 
+
                         if (0 == $block->loops % 10)                  
-                            log_cmsg("~C96\t\t#BLOCK_PROGRESS:~C00 %s, left vol %-7s, progress %.3f%%", strval($block), format_qty($left_volume), $pp);
+                            log_cmsg("~C96\t\t#BLOCK_PROGRESS:~C00 %s, left vol %-7s, progress %s", '~C93'.strval($block), format_qty($left_volume), $pp);
+
                     }   // if mini_cache loaded 
                     elseif (is_array($data) ) {
                         if ($block->attempts_bwd > 2 && $block->attempts_fwd > 2) {
@@ -982,10 +989,10 @@ SKIP_CHECKS:
 
             $tag = $block->index < 0 ? '~C40' : '~C04';
             if ($backward_scan)
-                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s before =~C40 %s~C49, attempts <<< %d", 
+                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s before =~C40 %s,~C49 attempts <<< %d", 
                                 $rqs_dbg, color_ts($tss), $block->attempts_bwd);                       
             else
-                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s after =~C40 %s~C49, attempts >>> %d", 
+                log_cmsg(" $tag~C33#{$dname}_DOWNLOAD($m_cycles/$index)~C00: from ~C04%s after =~C40 %s,~C49 attempts >>> %d", 
                                 $rqs_dbg, color_ts($tss), $block->attempts_fwd);
                                 
             // TODO: ttl config table                                
@@ -1102,7 +1109,7 @@ SKIP_CHECKS:
             if (!$this->table_corrected)
                 $this->CorrectTables();
 
-            
+                        
             
             $start = $this->HistoryFirst(); // method should cache return value in this->history_first                    
             

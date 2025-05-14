@@ -169,7 +169,7 @@
 
         public function __construct(string $symbol) {
             $this->loader_class = 'BinanceTicksDownloader';                        
-            $this->ws_data_kind = 'aggTrade';            
+            $this->ws_data_kind = 'aggTrade';
             $this->ws = null;            
             parent::__construct($symbol, 'ticks');
             $this->default_limit = 10000;
@@ -179,10 +179,10 @@
         }
 
         protected function ImportDataWS(mixed $data, string $context): int {
-            $valid = is_object($data) && str_contains('aggTrade', $data->e) && isset($data->t);
+            $valid = $this->VerifyRow($data);
 
             if (!$valid) {
-                log_cmsg("~C31#WS_IGNORE(ImportDataWS):~C00 can't detect data %s ", json_encode($data));
+                log_cmsg("~C31#WS_IGNORE(ImportDataWS):~C00 can't detect ticks data %s ", var_export($data, true));
                 return 0;
             }
 
@@ -192,6 +192,7 @@
                 return 0;
             }
             
+            /* // convert to REST trade format
             $raw = new stdClass();            
             $raw->time = $data->T;
             $raw->id = $data->f;
@@ -199,7 +200,8 @@
             $raw->qty = $data->q;
             $raw->isBuyerMaker = $data->m;
             $raw->isBestMatch = $data->M;
-            return $loader->ImportWS([$raw], $context);            
+            // */
+            return $loader->ImportWS([$data], $context);            
         }
                 
 
@@ -231,27 +233,7 @@
             }
             return true;
         }
-        protected function SubscribeWS() {
-            $keys =  array_keys($this->GetRTMLoaders());
-            $already = 0;
-            $added = 0;
-            foreach ($keys as $pair_id) {        
-                $downloader = $this->Loader ($pair_id);                                                     
-                if ($downloader->ws_sub) {
-                    $already ++;
-                    continue;
-                }
-                $params = ['channel' => 'aggTrade', 'symbol' => $downloader->symbol];
-                log_cmsg("~C97 #WS_SUB~C00: %s = %d", $downloader->symbol, $downloader->data_flags);
-                if ($this->ws instanceof BitfinexClient) {
-                    $this->ws->subscribe( $params);
-                    $added ++;
-                }
-            }
-            if ($added > 0)
-                log_cmsg("~C97 #WS_SUBSCRIBE:~C00 %d added, already %d confirmed", $added, $already);
-        } // function SubscribeWS
-
+     
         public function VerifyRow(mixed $row): bool {
             return is_object($row) && isset($row->T) && isset($row->f) && isset($row->p) && isset($row->q);
         }

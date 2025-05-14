@@ -39,15 +39,15 @@
         protected function on_ws_event(string $event, mixed $data) {
             if ('subscribe' == $event && is_array($data)) {
                 foreach ($data as $line) {
-                    $symbol = str_replace("@{$this->ws_data_kind}", '', $line);
+                    $symbol = strtok($line, '@');
                     $symbol = strtoupper($symbol);
-                    $downloader = $this->GetLoader ($symbol);
-                    if (null === $downloader) {
-                        log_cmsg("~C91#WS_IGNORE_SUB:~C00 no downloader  for %s ", $symbol);
+                    $loader = $this->GetLoader ($symbol);
+                    if (!is_object($loader)) {
+                        log_cmsg("~C91#WS_IGNORE_SUB:~C00 no downloader  for %s: %s", $line, $symbol);
                         continue;
                     }
-                    $downloader->ws_sub = true;
-                    unset($this->ws_sub_started[$downloader->pair_id]);
+                    $loader->ws_sub = true;
+                    unset($this->ws_sub_started[$loader->pair_id]);
                     log_cmsg("~C97#WS_SUBSCRIBED:~C00 %s", $symbol);
                 }
             } elseif ('ping' == $event && isset($data->payload)) {
@@ -73,30 +73,31 @@
                     $already ++;
                     continue;
                 }                
-                $list []= strtolower("{$downloader->symbol}@{$this->ws_data_kind}");
+                $this->ws_sub_started[$pair_id] = time();
+                $downloader->ws_sub_count ++;
+                if ($downloader->ws_sub_count < 5)
+                    $list []= strtolower($downloader->symbol) ."@{$this->ws_data_kind}";
             }
             if (0 == count($list)) return;
-
-            log_cmsg("~C97 #WS_SUBSCRIBE~C00: already subscribed %d / %d, add = %s", $already, count($keys), json_encode($list));
+            
             if (is_object($ws) && $ws instanceof BinanceClient && count($list) > 0) {
+                log_cmsg("~C97 #WS_SUBSCRIBE~C00: already subscribed %d / %d, add = %s", $already, count($keys), json_encode($list));
                 $ws->Subscribe ($list);
             }
-
         }
 
         public function ProcessRecord(stdClass $rec) {
             $ws = $this->ws;
             if (!$ws instanceof BinanceClient) return; // this only for VisualStudio PHPSense
 
-            try {
-                
+            try {               
 
                 // typical response without error and data
                 if (isset($rec->id) && null === $rec->result) {
                     $id = $rec->id;
                     $rqs = $ws->requests[$id];
                     $method = $rqs['method'] ?? 'nope';
-                    if ('SUBSCRIBE' == $method)
+                    if ('SUBSCRIBE' == $method && isset($rqs['params']))
                         $this->on_ws_event('subscribe', $rqs['params']);
                     
                 }

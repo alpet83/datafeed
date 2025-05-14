@@ -209,7 +209,7 @@
             return BLOCK_CODE::FULL == $this->code || BLOCK_CODE::VOID == $this->code;
         }
 
-        public function format_filled(int $avg_full = 1000): string {
+        public function FormatFilled(int $avg_full = 1000): string {
             $res = '';
             for ($hour = 0; $hour < 24; $hour ++)  {
                 $raw = $this->filled[$hour] ?? 0;                
@@ -229,6 +229,13 @@
                     $res .= '█';
             }
             return $res;
+        }
+
+        public function FormatProgress(): string {
+            if (0 == $this->target_volume) return '?%';
+            $left_volume = $this->LeftToDownload();
+            $pp = 100 - 100 * $left_volume / $this->target_volume;            
+            return sprintf("~C95%.3f%%", $pp);
         }
 
         public function format_ts(string $key, bool $color = true) {
