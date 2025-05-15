@@ -1,0 +1,18 @@
+#!/bin/bash
+PIDF=$1
+if [ -e $PIDF ];
+then
+ PID=`head -n 1 $PIDF`
+ echo "Trying kill $PID from $PIDF"
+ ps aux | grep bmx | grep php
+ for i in $(seq 1 10);
+ do
+   kill -SIGQUIT $PID
+   sleep 0.2
+ done
+ kill -SIGQUIT $PID
+ timeout 60 tail -f --pid $PID /dev/null
+ ps aux | grep bmx
+else
+ echo "WARN: not exists PID file $PIDF"
+fi

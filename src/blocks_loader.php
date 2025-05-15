@@ -268,6 +268,7 @@ SKIP_DOWNLOAD:
         }
 
         public   function  loaded_full() {                        
+            if (!$this->initialized) return false;
             $lb = $this->last_block;
             $elps = time() - $lb->max_avail;
             $data_ok = $elps < $this->normal_delay || $this->ws_sub;           
@@ -635,6 +636,7 @@ SKIP_CHECKS:
 
                     // если в предыдущую минуту было загружено данных с избытком, нужно небольшими шагами двигаться по истории внутри той-же минуты 
                     if ($heavy_data) {
+                        $coef = $last_density / $this->default_limit;
                         $step = $after_ms - $prev_after;
                         if (abs($step ) == $round_max || 0 == $step)                            
                             $after_ms  =  $block->newest_ms();  
@@ -657,8 +659,7 @@ SKIP_CHECKS:
                         $newest_ms = $cache->newest_ms();                        
 
                         // вариант контролирующей оптимизации: отталкиваться от времени крайней записи в кэше (слева и справа соответственно). 
-                        if ($heavy_data)  {              
-                            $coef = $last_density / $this->default_limit;                                                                     
+                        if ($heavy_data)  {                                          
                             $tag = $coef > 60 ? '#ULTRA_HEAVY_DATA' : '#HEAVY_DATA';
                             $pp = 100 * $coef;
                             $after_ms  = floor_to($after_ms, $round_step );

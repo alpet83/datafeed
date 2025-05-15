@@ -193,7 +193,7 @@
             
             $minute = date('i');
             if (7 == $minute % 10) {
-                if (!is_object($mysqli_df->replica) || !$mysqli_df->replica->ping()) {
+                if (MYSQL_REPLICA && !is_object($mysqli_df->replica) || !$mysqli_df->replica->ping()) {
                     $mysqli_df->replica = ClickHouseConnectMySQL('db-remote.lan:9004', null, null, DB_NAME);                    
                 }
             }

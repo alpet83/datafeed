@@ -1,0 +1,2 @@
+#!/bin/bash
+safe_kill /tmp/bfx/candles_dl@all.pid

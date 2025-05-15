@@ -1287,7 +1287,7 @@ RESYNC:
             
         }         
 
-        if (!is_object($replica) || !$replica->ping()) {                
+        if (MYSQL_REPLICA && !is_object($replica) || !$replica->ping()) {                
             if ($elps > 60) {  // not to frequent                    
                 log_cmsg("~C31 #WARN:~C00 replication DB connection is lost, trying reconnect...");
                 $replica = init_replica_db(DB_NAME);
@@ -1357,7 +1357,8 @@ RESYNC:
     
         $mysqli->try_query("SET time_zone = '+0:00'");
         $mysqli->set_opt(MYSQLI_OPT_READ_TIMEOUT, 60);
-        $mysqli->replica = init_replica_db(DB_NAME);
+        if (MYSQL_REPLICA)
+            $mysqli->replica = init_replica_db(DB_NAME);
         log_cmsg("~C93 #START:~C00 connected to~C92 localhost@$db_name_active~C00 MySQL, ClickHouse [$pid] = ".is_object($chdb)); 
         $elps = -1;          
         $manager = new CandleDownloadManager($symbol);

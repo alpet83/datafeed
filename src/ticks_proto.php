@@ -128,9 +128,9 @@
             if (0 == count($this->unfilled_vol)) return true;
             $sum = 0;
             foreach ($this->unfilled_vol as $v) 
-                if ($v > 0) $v += $sum;
+                if ($v > 0) $sum += $v;
 
-            return $v < $this->target_volume * 0.0001;
+            return $sum < $this->target_volume * 0.0001;
         }
 
         public function LeftToDownload(): float {
@@ -735,7 +735,8 @@
                 $mdiff = $check_volume - $block->minutes_volume;
                 $mdiff_pp = 100 * $mdiff / max($check_volume, $block->minutes_volume, 0.01);
                 if (abs($mdiff_pp) < 0.1) {
-                    log_cmsg("~C31 #API_HISTORY_GAP:~C00 ticks volume looks near to minute candles volume, diff = %.2f%%", $mdiff_pp);
+                    if ($block->minutes_volume < $block->target_volume)
+                        log_cmsg("~C31 #API_HISTORY_GAP:~C00 ticks volume looks near to minute candles volume, diff = %.2f%%", $mdiff_pp);
                     $whole_load = true;
                     $load_result = 'same as minutes';
                 }
@@ -1321,9 +1322,10 @@ SKIP_SCAN:
         else
             error_exit("~C91#FATAL:~C00 cannot connect to ClickHouse DB via MySQL interface! ");
 
-        $mysqli_df->replica = ClickHouseConnectMySQL('db-remote.lan:9004', null, null, DB_NAME);
-        if (is_object($mysqli_df->replica)) {
-            log_cmsg("~C103~C30 #WARN_REPLICATION:~C00 %s connected", $mysqli_df->replica->host_info);        
+        if (CLICKHOUSE_REPLICA) { // if const are defined not as null/false            
+            $mysqli_df->replica = ClickHouseConnectMySQL(CLICKHOUSE_REPLICA.':9004', null, null, DB_NAME);
+            if (is_object($mysqli_df->replica)) 
+                log_cmsg("~C103~C30 #WARN_REPLICATION:~C00 %s connected", $mysqli_df->replica->host_info);        
         }        
 
         $mysqli->try_query("SET time_zone = '+0:00'");

@@ -40,7 +40,7 @@
     }
 
 
-    function init_replica_db(string $db_name, array $db_hosts = ['db-remote.lan', 'db-remote.vpn'])  {
+    function init_replica_db(string $db_name, array $db_hosts = [MYSQL_REPLICA])  {
         global $db_error, $db_profile, $db_alt_server;
         $db_alt_server = '<no hosts defined>';
         $db_profile = [];
@@ -489,7 +489,7 @@
             try {            
                 $avail = $ws->unreaded();
                 if (0 == $avail) return 0;
-                
+
                 $t_start = pr_time();
                 $recv = $ws->receive();
                 $opcode = $ws->getLastOpcode();

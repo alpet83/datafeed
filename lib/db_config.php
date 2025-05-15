@@ -7,8 +7,12 @@
 
     // for simplicity hosts can be used in /etc/hosts with real IP-addrs
     $db_servers = ['db-local.lan'];
-    $db_alt_server = 'db-remote.vpn';
+    
+    const MYSQL_REPLICA = false;
+    $db_alt_server = MYSQL_REPLICA;
     
     const CLICKHOUSE_HOST = 'db-local.lan';
+    const CLICKHOUSE_REPLICA = false; // 'db-remote.lan';
+    
     const CLICKHOUSE_USER = 'loader';
     const CLICKHOUSE_PASS = '**********';

@@ -390,7 +390,7 @@
                 while (count($this->filled) <= $hour)
                     $this->filled[] = 0; // fill empty hours
             $this->filled[$hour] += $records; // чувствительно к повторным заполнениям!            
-            if ($this->IsFullfilled() && $this->code != BLOCK_CODE::FULL) {
+            if ($this->IsFullFilled() && $this->code != BLOCK_CODE::FULL) {
                 $this->code = BLOCK_CODE::FULL;                                
                 $this->info = 'full fill detected';
             }

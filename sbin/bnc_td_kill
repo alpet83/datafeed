@@ -1,0 +1,2 @@
+#!/bin/bash
+safe_kill /tmp/bnc/ticks_dl@all.pid

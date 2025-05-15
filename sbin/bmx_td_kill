@@ -1,0 +1,3 @@
+#!/bin/bash
+safe_kill /tmp/bmx/ticks_dl@all.pid
+
