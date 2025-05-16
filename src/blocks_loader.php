@@ -3,7 +3,21 @@
     require_once 'data_block.php';   
     define('END_OF_TODAY', floor_to_day(time()) + SECONDS_PER_DAY - 1); // non static - not really const!    
 
+    $active_loader = null;  // global var
 
+    echo '...';
+
+    function shadow_work(int $us) {
+        global $active_loader;
+        if (is_object($active_loader))
+            $active_loader->ProcessPause($us);
+    }    
+
+    /** 
+     * BlockDataDownloader class - загрузчик данных по блокам, где каждый блок имеет временной диапазон (например день или больше). 
+     * Основной функционал: восстановление исторических данных в БД, через синхронную загрузку оных через REST API
+     */
+    
 
     abstract class BlockDataDownloader 
              extends DataDownloader {
@@ -70,14 +84,17 @@
         protected   $total_scheduled = 0;
 
         protected    $cache = null; // cache object, descendant from DataBlock                
-
         protected    $cache_file_last = '';
-        
-        protected   $rqs_cache_map = []; // [md5(rqs)] = API response
+
         protected   $cache_hit = false;
 
         protected   $cache_dir = ''; 
 
+        protected    $mini_cache = null; // with latest imported intraday data (part)
+
+        public      $ws_raw_data = [];   // raw data from WebSocket, accumulation from single cycle
+        
+        protected   $rqs_cache_map = []; // [md5(rqs)] = API response
         protected   $last_api_headers = ''; //  last API response headers for ratelimit control
         protected   $last_api_request = ''; // last API request by api_request function
         protected   $last_api_rqt = 0.0; // last API request time in seconds
@@ -119,7 +136,7 @@
 
 
         protected function api_request(string $url, array $params, int $cache_for = 180): string { // REST API request with typical GET params.
-            global $rest_allowed_ts, $curl_resp_header, $curl_default_opts;
+            global $rest_allowed_ts, $curl_resp_header, $curl_default_opts, $active_loader;
             $res = 'fail?'; 
             $this->cache_file_last = '';
             $fresh_rqs = [];
@@ -182,12 +199,13 @@
                 return 'TEMPORARY_BAN(ratelimit: error) rest_allowed_ts = '.date(SQL_TIMESTAMP, $rest_allowed_ts);
             }
 
+            $active_loader = $this;
             $rq_start = pr_time();
             $this->last_api_wait = $rq_start - $t_start;
             $this->last_api_request = $rqs;
             $opts = clone $curl_default_opts;
             if ($this->current_interval < SECONDS_PER_DAY)   
-                $opts->wait_func = 'usefull_wait';     // need load WebSocket incoming data fast as possible, while intraday history download
+                $opts->wait_func = 'shadow_work';     // need load WebSocket incoming data fast as possible, while intraday history download
             $res = curl_http_request($rqs, null, $opts);
             $this->last_api_headers = $curl_resp_header;
             $this->last_api_rqt = pr_time() - $rq_start;
@@ -827,6 +845,7 @@ SKIP_CHECKS:
                     $count_diff = 0;
                     $dups_diff = 0;
                     if (is_object($mini_cache)) { 
+                        $this->mini_cache = $mini_cache; // last for processing in child classes
                         $imp = count($mini_cache);    
                         $added += $imp;                      
                         $last_density = $mini_cache->DataDensity();                      
@@ -1103,6 +1122,8 @@ SKIP_CHECKS:
                 return date_ms(SQL_TIMESTAMP3, verify_timestamp_ms($t, 'TimeStampEncode'));
             return date(SQL_TIMESTAMP, verify_timestamp($t, 'TimeStampEncode')); // default
         }        
+
+        public function ProcessPause(int $us) {  usefull_wait($us); }
 
         public function PrepareDownload() {
             

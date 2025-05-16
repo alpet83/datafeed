@@ -7,18 +7,29 @@
 
     ob_implicit_flush();
     set_include_path(".:./lib");
-    require_once 'lib/common.php';
-    require_once 'lib/esctext.php';
-    require_once 'lib/db_tools.php';
-    require_once 'lib/db_config.php';
-    require_once 'lib/clickhouse.php';
-    require_once 'lib/rate_limiter.php';
-    require_once 'ticks_proto.php';
-    require_once 'bnc_websocket.php';
-    require_once 'proto_manager.php';
-    require_once 'bnc_dm.php';
-    require_once 'vendor/autoload.php';
+    $sources = ['lib/common.php',
+                'lib/esctext.php',
+                'lib/db_tools.php',
+                'lib/db_config.php',
+                'lib/clickhouse.php',
+                'lib/rate_limiter.php',
+                'data_block.php',
+                'blocks_loader.php',
+                'candles_cache.php',
+                'ticks_proto.php',                
+                'bnc_websocket.php',
+                'proto_manager.php',
+                'bnc_dm.php',
+                'vendor/autoload.php'];
 
+    foreach ($sources as $file_name) try {
+        echo "including $file_name ";
+        require_once $file_name;
+        echo " - OK\n";
+    }            
+    catch (\Error $E) {
+        printf ("#EXCEPTION(require_once): %s\n", $E->getMessage());
+    }   
 
     echo "<pre>\n";
     $tmp_dir = '/tmp/bnc';
@@ -51,14 +62,14 @@
             if ($this->history_first > 0)
                 return $this->history_first;
             $params = ['fromId' => 0, 'limit' => 1, 'symbol' => $this->symbol ];
-            $url = "{$this->rest_api_url}historicalTrades";
+            $url = "{$this->rest_api_url}aggTrade";
             $json = $this->api_request($url, $params, SECONDS_PER_DAY);  // not ask for 24h
             $data = json_decode($json);
             
             if (is_array($data) && count($data) > 0) {
                 $rec = $data[0];
                 $min = strtotime(HISTORY_MIN_TS); // not need load more
-                $t_first = $rec->time / 1000; // need seconds
+                $t_first = $rec->T / 1000; // need seconds
                 return $this->history_first = max($min, $t_first); // ограничение глубины данных в прошлое!!
             }
             return false;    
@@ -201,7 +212,8 @@
             $raw->isBuyerMaker = $data->m;
             $raw->isBestMatch = $data->M;
             // */
-            return $loader->ImportWS([$data], $context);            
+            $loader->ws_raw_data []= $data; // слишком много тиков приходит за одну порцию, поэтому их лучше группировать
+            return 1;            
         }
                 
 

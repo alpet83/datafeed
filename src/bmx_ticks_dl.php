@@ -9,6 +9,7 @@
     require_once 'lib/db_config.php';
     require_once 'lib/clickhouse.php';
     require_once 'lib/rate_limiter.php';
+    require_once 'blocks_loader.php';
     require_once 'ticks_proto.php';
     require_once 'bmx_websocket.php';
     require_once 'proto_manager.php';

@@ -9,7 +9,7 @@
     require_once 'lib/db_config.php';
     require_once 'lib/clickhouse.php';
     require_once 'lib/rate_limiter.php';
-    
+
     require_once "candle_proto.php";
     require_once "bmx_websocket.php";
     require_once "proto_manager.php";
@@ -18,7 +18,7 @@
 
     
     $tmp_dir = '/tmp/bmx';
-    define('REST_ALLOWED_FILE', $tmp_dir.'/rest_allowed.ts');    
+    define('REST_ALLOWED_FILE', "$tmp_dir/rest_allowed.ts");
 
     $log_stdout = true;
     $verbose = 3;

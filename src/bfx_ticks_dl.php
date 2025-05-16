@@ -154,11 +154,8 @@
                 if ('te' == $code || 'tu' == $code) {                        
                     $tick = $data[2] ?? null;
                     if ($this->VerifyRow($tick)) {
-                        $imported =  $downloader->ImportWS([$tick], "$context update-$code"); // direct sync                        
-                        $downloader->ws_time_last = time();
-                        $downloader->ws_loads += $imported;                       
-                        if ($verbose > 3)
-                             log_cmsg("~C94#WS_UPDATE:~C00 code %s = %d", $code, $imported);                            
+                        $downloader->ws_raw_data []= $data;                      
+                        
                     }
                     else
                         log_cmsg("~C31#WS_UPDATE:~C00 not a tick?: %s", print_r($tick, true));

@@ -269,6 +269,22 @@
 
         public function get_keys(): array { return array_keys($this->cache_map);    }
 
+        public function Import(array $data, bool $over = true) {
+            $this->duplicates = 0;
+            if ($over)
+                $this->cache_map = $data;
+            else    
+                $this->cache_map = array_replace($this->cache_map, $data);
+
+            if (count($data) > 0) {                              
+                $this->min_avail = ceil ($this->oldest_ms() / 1000);
+                $this->max_avail = floor($this->newest_ms() / 1000);
+            }
+            elseif ($over)
+                $this->Reset();
+
+        }
+
         public function IsEmpty(): bool { return BLOCK_CODE::NOT_LOADED == $this->code && 0 == count($this); }
 
         public function IsFull(): bool { return BLOCK_CODE::FULL == $this->code; }

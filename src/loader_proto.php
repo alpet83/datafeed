@@ -157,7 +157,7 @@
 
         public      $ws_data_last = 0;  // latest timestamp in WebSocket data
 
-        public      $ws_time_last = 0;  // клиентское время приема последних данных
+        public      $ws_time_last = 0;  // клиентское время приема последних данных в секундах
         public      $ws_newest = 0;     // лучшее время данных полученных через ws
         public      $ws_sub = null;    // ws subscription desc or true 
         public      $ws_channel   = 0; // id for WebSocket sub         
@@ -285,6 +285,10 @@
                 log_cmsg("~C31#WARN:~C00 Connection is null, can't process template from %s", $file_name);
                 return false;
             }
+            $qfn = "sql/$file_name";
+            if (file_exists($qfn)) 
+                $file_name = $qfn;
+            
             if (!file_exists($file_name))
                 throw new Exception("FATAL: not exists template file: $file_name");                
             
@@ -322,11 +326,10 @@
     };
 
 
-    /** 
-     * BlockDataDownloader class - загрузчик данных по блокам, где каждый блок имеет временной диапазон (например день или больше). 
-     * Основной функционал: восстановление исторических данных в БД, через синхронную загрузку оных через REST API
-     */
-    
+     function sqli_df(): ?mysqli_ex {
+        global $mysqli_df;
+        return $mysqli_df;
+    }
 
 
 

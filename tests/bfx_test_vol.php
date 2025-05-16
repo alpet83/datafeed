@@ -12,6 +12,7 @@
     $start_ms = $start * 1000;
     $end_ms = ($start + 86400) * 1000 - 1;       
     $url = "https://api.bitfinex.com/v2/candles/trade:1m:$symbol/hist?limit=1500&sort=1&start=$start_ms"; 
+    log_cmsg("~C97 #API_REQUEST:~C00 %s", $url);
     $json = file_get_contents($url);
     if ($json === false) {
         log_cmsg("~C91 #ERROR:~C00 fetching data from API\n");
@@ -46,6 +47,7 @@
     }       
 
     $url = "https://api.bitfinex.com/v2/candles/trade:1h:$symbol/hist?limit=24&sort=1&start=$start_ms&end=$end_ms"; 
+    log_cmsg("~C97 #API_REQUEST:~C00 %s", $url);
     $json = file_get_contents($url);
     if ($json === false) {
         log_cmsg("~C91 #ERROR:~C00 fetching data from API\n");
@@ -90,6 +92,7 @@
                 date_ms('Y-m-d H:i:s', $latest));
 
     $url = "https://api.bitfinex.com/v2/candles/trade:1D:$symbol/hist?limit=1&sort=1&start=$start_ms";
+    log_cmsg("~C97 #API_REQUEST:~C00 %s", $url);
     $json = file_get_contents($url);
     if ($json === false) {
         log_cmsg("~C91 #ERROR:~C00 fetching daily data from API\n");

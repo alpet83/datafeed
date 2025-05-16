@@ -1,8 +1,5 @@
-<?php
-    include_once('lib/common.php');
-    include_once('lib/esctext.php');
-    require_once("bfx_websocket.php");
-    require_once('rate_limiter.php');
+<?php        
+    require_once 'lib/rate_limiter.php';
 
     const SECONDS_PER_DAY = 24 * 3600;
     const WORKING_PERIOD = 3570; // 60 * 59 + 30 seconds
@@ -280,14 +277,8 @@
             log_cmsg("~C91 #WS_WARN:~C00 WebSocket reconnect due %s, realtime loaders %d", $reason, count($loaders));
             $ws = $this->ws;
             $this->ws_reconnects ++;
-            $this->ws_active = false;            
-            try { 
-                if (is_object($ws))
-                    $ws->close();
-            } catch (Exception $E) {
-                $this->ws = null;
-            }
-
+            $this->ws_active = false;                        
+            $this->ws = null;
             $this->CreateWebsocket();            
             $this->subs_map = [];
             $this->platform_status = -1; // means unknown
@@ -448,11 +439,19 @@
             $unread = 1; // $this->ws->unreaded();  
           
             $readed = 0;     
+            $t_start = pr_time();
             while ($unread > 0) { 
                 $readed += $this->LoadPacketWS(); 
-                if (!is_object($this->ws)) break; // connection lost
-                $unread = $this->ws->unreaded();                
+                $elps = pr_time() - $t_start;
+                if (!is_object($this->ws) || $elps >= 1) break; // connection lost / timeout(hang)
+                $unread = $this->ws->unreaded();                                
             }  // while unread
+
+            foreach ($this->loaders as $loader) 
+                if (is_object($loader)) {
+                    $loader->ImportWS(true, 'WebSocket/LoadWS');                    
+                }                       
+
             return $readed;
         }
 
