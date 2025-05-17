@@ -346,8 +346,8 @@
             $inaccuracy = 0.01; // погрешность суммирования float с очень разным порядком 0.01%
             if (abs($diff_pp) < $this->volume_tolerance && ($recv > 0 || $diff_pp + $inaccuracy >= 0)) {
                 $whole_load = true;
-                log_cmsg("$prefix($symbol/$index/$attempts):~C00 %s, attempts %d, %s,\n\t\ttarget_volume reached %s in %d ticks, block summary %s, filled in session: %s ", 
-                            strval($block), $attempts, $block->info, format_qty($check_volume), $count, json_encode($check), $filled);    
+                log_cmsg("$prefix($symbol/$index/$attempts):~C00 %s, attempts %d, %s,\n\t\ttarget_volume reached %s in %d ticks, block summary %s, sess. time spent %.1f min, filled in session: %s ", 
+                            strval($block), $attempts, $block->info, format_qty($check_volume), $count, json_encode($check), $block->sess_load_time, $filled);    
                 if (-1 == $block->index)
                      $this->RecoveryCandles($block, $check_volume);  // upgrade latest
                 
@@ -504,9 +504,57 @@
                         count($data), count($bc), count($sc), $elps);
         }
 
-        public function ProcessPause(int $us) {
-            $this->ProcessAggregate();
+        public function ProcessPause(int $us) {                        
             parent::ProcessPause($us);
+            if (0 == $this->shadow_jobs) return;
+            $this->shadow_jobs --;
+
+            $this->ProcessAggregate();            
+            $rbc = sqli()->select_row('date,target_volume', 'download_schedule',
+                                        "WHERE (ticker = '{$this->ticker}') AND (kind = 'rebuild-c') LIMIT 1", MYSQLI_OBJECT);
+            if ($rbc)
+                $this->RebuildCandles($rbc->date, $rbc->target_volume);
+        }
+
+        /** Rebuild candles from ticks full day load from DB  */
+        protected function RebuildCandles(string $date, float $target_vol) {
+            $mysqli_df = sqli_df();
+            $src = $this->table_name;    
+            $saldo_vol = 0;        
+            $saldo_elps = 0;
+            $candles_table = str_replace('ticks', 'candles', $this->table_name);
+            for ($h = 0; $h < 24; $h++) {
+                $t_start = pr_time();
+                $rows = $mysqli_df->select_map('trade_no, toUnixTimestamp(ts) * 1000 + toMillisecond(ts), buy, price, amount, trade_no', $src, 
+                                        "WHERE DATE(ts) = '$date' AND HOUR(ts) = $h", MYSQLI_NUM);
+                if (0 == count($rows)) continue;                                                      
+                foreach ($rows as $k => $row) {
+                    $rows[$k][TICK_TMS] = $row[TICK_TMS] * 1; 
+                    $rows[$k][TICK_PRICE] = $row[TICK_PRICE] * 1;
+                    $rows[$k][TICK_AMOUNT] = $row[TICK_AMOUNT] * 1;
+                    $rows[$k][TICK_BUY] = $row[TICK_BUY] * 1; 
+                }
+
+                $mc = new TicksCache($this);
+                $mc->key = $date;
+                $mc->target_volume = $target_vol; // prevent upgrade daily volume here
+                $mc->Import($rows);
+                $volume = $mc->SaldoVolume();
+                $saldo_vol += $volume;
+                $this->RecoveryCandles($mc, 0, true); // rebuild for single hour
+                $this->ProcessAggregate($mc); // rebuild 1s candles
+                $elps = pr_time() - $t_start;
+                $saldo_elps += $elps;
+                if ($elps > 1)
+                    log_cmsg("~C96#PERF_REBUILD_CANDLES:~C00 hour %02d loaded %7d ticks, %s volume, elapsed: %.3f s", 
+                            $h, count($rows), format_qty($volume), $elps);                            
+            }            
+            $query = "UPDATE {$candles_table}__1D SET `volume` = GREATEST(`volume`, $saldo_vol) WHERE Date(`ts`) = '$date';";
+            sqli()->try_query($query);
+            $query = "DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'rebuild-c') AND (date = '$date');";
+            sqli()->try_query($query);
+            log_cmsg("~C96#REBUILD_CANDLES:~C00 %s, saldo volume %s, elapsed %.3f s", 
+                    $date, format_qty($saldo_vol), $saldo_elps);
         }
 
         protected function ReconstructCandles(array $source, int $period = 60, mixed $exclude = null): array {
@@ -565,7 +613,8 @@
             $c_map = $this->ReconstructCandles($source);
             $start_ts = date_ms(SQL_TIMESTAMP, $start);
             $end_ts = date_ms(SQL_TIMESTAMP, $end);
-            $exists = $mysqli->select_map('ts,volume', $candles_table, "WHERE ts >= '$start_ts' AND ts <= '$end_ts'");
+            $strict = "ts >= '$start_ts' AND ts <= '$end_ts'";
+            $exists = $mysqli->select_map('ts,volume', $candles_table, "WHERE $strict");
             $rows = [];            
             $info = "EXISTS {$block->key}: ". print_r($exists, true);
             $info .= "UPGRADE: ".print_r($c_map, true);
@@ -785,7 +834,7 @@ RESTART:
             $history = []; // attempts count map
             foreach ($dh_rows as $rec) {
                 $day = $rec->date;
-                $history = ($history[$day] ?? 0) + 1;
+                $history[$day] = ($history[$day] ?? 0) + 1;
             }
             unset($control_map[$today]);                                                              
             unset($days_map[$today]);
@@ -793,7 +842,7 @@ RESTART:
             $rescan = [];
             $this->blocks = [];
             $this->blocks_map = [];
-            $full = $incomplete = 0;
+            $full = $partial = 0;
 
             $voids = 0;
             if (!$this->initialized) {
@@ -816,6 +865,8 @@ RESTART:
             ksort($control_map);  
             $first_day = array_key_first($control_map);         
             $t_start = pr_time();       
+
+            $bad_candles = [];
                  
             
             foreach ($control_map as $day => $cstat) {        
@@ -838,7 +889,6 @@ RESTART:
                     continue;
                 }                    
 
-                $bad_candles = false;
                 $block->minutes_volume = $candles_vol = $cstat->volume;                       
                 $meta = $days_map[$day];
                 $last_price = 0;
@@ -848,14 +898,19 @@ RESTART:
                     $target_trades = $day_ex->trades;
                     $extra = $day_ex->volume - $candles_vol;
                     $extra_pp = 100 * $extra / max($candles_vol, $day_ex->volume);
-                    if ($extra_pp >= 0.1)
+                    if ($extra_pp >= 0.1) {
                         log_cmsg("~C31 #VOLUME_MISMATCH({$this->ticker}):~C00 for %s candles: saldo %s < daily %s, diff = %s (%.2f%%). Using from higher timeframe",
                                 $day, format_qty($candles_vol), format_qty($day_ex->volume), format_qty($extra), $extra_pp); 
-                    $candles_vol =  $day_ex->volume; // 1D table can be manually patched, means have max priority                    
-                    $bad_candles = true;
+                        $candles_vol =  $day_ex->volume; // 1D table can be manually patched, means have max priority                    
+                        $bad_candles [$day] = $candles_vol;                                
+                    }
                 }
 
-                $attempts = array_value($history, $date, 0); // well fast get attempts count                                    
+                $attempts = array_value($history, $day, 0); // well fast get attempts count                                    
+                if ($attempts > 3) { // TODO: check code not duplicated
+                    $cleanup = sprintf("DELETE FROM download_history WHERE date = '$day' AND kind = 'ticks' AND ticker = '{$this->ticker}' LIMIT %d ", $attempts - 3);
+                    $mysqli->try_query($cleanup);
+                }
                 $min = $meta->min;
                 $max = $meta->max;                    
                 $void_left  = max(0, $block->min_avail - strtotime($cstat->min)) / 60.0;
@@ -866,7 +921,7 @@ RESTART:
                 $vdiff_pp = 100 * $vdiff / max($candles_vol, $meta->volume, 0.1);                                                                            
                 $vol_info = '';
                 $excess = false;
-                $incomplete = true;
+                $incomplete = false;
 
                 $price_info = '';
 
@@ -883,7 +938,7 @@ RESTART:
                         $incomplete = false;
                     }
                     else {
-                        $incomplete |= true;
+                        $incomplete = true;
                         if ($vdiff > 0) 
                             $vol_info = sprintf('~C00, ~C93less~C00 relative candles =~C95 %8.1f%%~C00, diff +', $vdiff_pp);                                                            
                         else {
@@ -892,10 +947,10 @@ RESTART:
                         }
                         $vol_info .= format_qty($vdiff) ;
                     }                       
-                    if ($meta->count < $target_trades) {
+                    /* if ($meta->count < $target_trades) {
                         $incomplete = true;
                         $vol_info .= sprintf('~C00, ~C91insufficiently~C00 trades count %d < %d', $meta->count, $target_trades);
-                    }
+                    } // */
                 }                   
 
                 if (is_object($day_ex) && $incomplete) {
@@ -915,7 +970,6 @@ RESTART:
                                             $meta->low, $meta->high, $last_price);
                 }               
                                 
-                $incomplete |= $bad_candles;
                 $block->code = $incomplete ? BLOCK_CODE::PARTIAL : BLOCK_CODE::FULL;
                 
                 if ($block->code == BLOCK_CODE::FULL) {
@@ -925,8 +979,6 @@ RESTART:
                 }
                 if (0 == $meta->volume) 
                     $block->code = BLOCK_CODE::NOT_LOADED;
-
-                $incomplete ++;                    
 
                 if ($attempts > 1) {
                     log_cmsg("~C33 #SCAN_BLOCK_SKIPPED({$this->ticker}):~C00 %s, already %d attempts to load", $day, $attempts);
@@ -940,11 +992,12 @@ RESTART:
                 $block->target_count = $target_trades;
                 $block->db_need_clean = $excess;
                 $rescan []= $block;
+                $partial ++;
                 $tag = $excess ? '~C04~C97#BLOCK_NEED_RELOAD' : '~C94#BLOCK_NEED_FINISH';
-                log_cmsg("$tag({$this->symbol}):~C00 index %4d, day %s [%s..%s, volume %10s%s in %d ticks]; %s margins [%.3f, %.3f] hours, code %s",
+                log_cmsg("$tag({$this->symbol}):~C00 index %4d, day %s [%s..%s, volume %10s%s in %d ticks]; %s margins [%.3f, %.3f] hours, attempt %d, code %s",
                                 $block->index, $day, $min, $max, 
                                 format_qty($meta->volume), $vol_info, $meta->count, $price_info,                                            
-                                    $void_left, $void_right, $block->code->name);
+                                    $void_left, $void_right, $attempts, $block->code->name);
                    
             } // foreach control_map - main scan loop
 SKIP_SCAN:          
@@ -972,6 +1025,11 @@ SKIP_SCAN:
                 $rows []= sprintf("('%s', 'ticks', '%s', %f, 0)", 
                                     $block->key, $this->ticker, $block->target_volume);
             }
+            foreach ($bad_candles as $day => $tv) {
+                $rows []= sprintf("('%s', 'rebuild-c', '%s', %f, 0)", 
+                                    $day, $this->ticker, $tv);
+            }
+
             if (count($rows) > 0) {
                 $query .= implode(",\n", $rows);
                 if ($mysqli->query($query)) // WARN: need ignore replica
@@ -1001,10 +1059,10 @@ SKIP_SCAN:
             }
 
             $tag = $this->initialized ? '#RELOAD_BLOCKS' : '#INIT_BLOCKS';
-            if (0 == ($full + $incomplete) && count($control_map) > 0)
+            if (0 == ($full + $partial) && count($control_map) > 0)
                 $tag = "~C91 #MISSED_BLOCKS:";
-            log_cmsg("~C97$tag:~C00 for symbol %s will used range %s .. %s, expected download %d blocks, %d incomplete, %d full from %d, skips: %s", $this->symbol,
-                    $first, $last, $this->BlocksCount(), $incomplete, $full, count($control_map), json_encode($skips));            
+            log_cmsg("~C04~C97$tag:~C00 for symbol %s will used range %s .. %s, expected download %d blocks, %d partial, %d full from %d, skips: %s", $this->symbol,
+                    $first, $last, $this->BlocksCount(), $partial, $full, count($control_map), json_encode($skips));            
         } // function ScanIncomplete
     
 

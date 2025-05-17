@@ -43,6 +43,8 @@
         public  $last_api_request = ''; // last API request
         public  $last_load = 0; // last load was (timestamp in seconds)
 
+        
+
         public  $loops = 0;     // сколько циклов загрузки было уже
 
         public  $avail_volume = 0; // объем в БД, для блоков подлежащих восстановлению
@@ -50,6 +52,8 @@
         public  $target_close = 0;  // целевая цена закрытия блока, при перезагрузке
         public  $target_count = 0;  // целевое количество записей блока, если поддерживается биржей
         public  $target_volume = 0; // целевой объем, для контроля 
+
+        public  $sess_load_time = 0.0; // how time in seconds was used for loading block in THIS session
 
         public  $db_need_clean = false; // указание на зачистку области БД, где есть записи подходящие по диапазону
                 
@@ -276,7 +280,7 @@
             else    
                 $this->cache_map = array_replace($this->cache_map, $data);
 
-            if (count($data) > 0) {                              
+            if (count($data) > 0) {      
                 $this->min_avail = ceil ($this->oldest_ms() / 1000);
                 $this->max_avail = floor($this->newest_ms() / 1000);
             }

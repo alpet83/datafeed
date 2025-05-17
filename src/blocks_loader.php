@@ -83,6 +83,8 @@
         protected   $total_requests = 0;        
         protected   $total_scheduled = 0;
 
+        protected   $shadow_jobs = 0; // number of shadow jobs for REST API request              
+
         protected    $cache = null; // cache object, descendant from DataBlock                
         protected    $cache_file_last = '';
 
@@ -204,8 +206,10 @@
             $this->last_api_wait = $rq_start - $t_start;
             $this->last_api_request = $rqs;
             $opts = clone $curl_default_opts;
-            if ($this->current_interval < SECONDS_PER_DAY)   
+            if ($this->current_interval < SECONDS_PER_DAY) {
                 $opts->wait_func = 'shadow_work';     // need load WebSocket incoming data fast as possible, while intraday history download
+                $this->shadow_jobs = 2;
+            }
             $res = curl_http_request($rqs, null, $opts);
             $this->last_api_headers = $curl_resp_header;
             $this->last_api_rqt = pr_time() - $rq_start;
@@ -1310,13 +1314,17 @@ SKIP_CHECKS:
                 }
 
                 if (BLOCK_CODE::NOT_LOADED == $block->code || BLOCK_CODE::PARTIAL == $block->code) {
+                    $t_start = pr_time();
                     $res = $this->LoadBlock($index);
                     $key = $block->code->value;                             
                     $total_loops += $block->loops;
                     $total_loads += $res;
-                    
-                    if ($res >= 500)                         
-                        $big_loads ++; // historical loads                                        
+                    $elps = pr_time() - $t_start;
+                    $block->sess_load_time += $elps;
+
+                    if ($elps >= 10)                         
+                        $big_loads ++; // relative big historical loads/repair
+
                     if (0 == $res && BLOCK_CODE::FULL != $block->code) {
                         if (strlen($this->last_error) > 1) {
                             $ke = $this->last_error;

@@ -337,26 +337,34 @@
             $sync_batch = $mysqli_df->select_map('date,target_volume', 'download_schedule', "WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (target_volume > 0) LIMIT 100");            
             if (count($sync_batch) > 0) {                
                 log_cmsg("~C33 #SYNC_BATCH:~C00 requested candles sync for %d days", count($sync_batch));
+                $db_name = DB_NAME;
+                $parts = $mysqli_df->select_map('PARTITION_NAME, TABLE_ROWS', 'information_schema.partitions', 
+                                                "WHERE TABLE_SCHEMA = '{$db_name}' AND TABLE_NAME = '{$this->table_name}'", MYSQLI_NUM);
                 $dtl = array_keys($sync_batch);
                 $ptl = [];
                 foreach ($dtl as $dt) {
                     $year = substr($dt, 0, 4);
-                    $part = $year > 2015 ? "p$year" : "parch"; // TODO: need detect real year of parch partition
+                    $part = "p$year"; 
+                    if (!isset($parts[$part])) 
+                        $part = 'parch';                        
                     $ptl[$part] = max(0, count($ptl) - 1);
                 }
                 $ptl = implode(",", array_flip($ptl));
                 $dtl = implode("','", $dtl);                
-                $params = "PARTITION ($ptl)";
+                $params = count($parts) > 0 ? "PARTITION ($ptl) " : '';
                 $params .= " WHERE DATE(ts) in ('$dtl') GROUP BY DATE(ts)";
                 $tmap = $mysqli_df->select_map('DATE(ts), COUNT(*) as count, SUM(volume) as volume', $this->table_name, $params, MYSQLI_OBJECT);
+
                 foreach ($sync_batch as $date => $tv) {
                     $target = $tmap[$date] ?? false;
                     if (is_object($target)) {
                         $this->SyncClickHouse($date, $target);
                         $mgr->ProcessWS(false);
                     }
-                    else
-                        log_cmsg("~C31 #WARN_SKIP_SYNC:~C00 no source data for %s ", $date);
+                    else {
+                        log_cmsg("~C31 #WARN_SKIP_SYNC:~C00 no source data for %s, parts: %s", $date, json_encode($parts));
+                        $mysqli_df->try_query("DELETE FROM download_schedule WHERE date = '$date' AND ticker = '{$this->ticker}' AND kind = 'sync-c'");
+                    }
                     if (!$mgr->active) break;
                 }            
             }
@@ -419,6 +427,21 @@
                    log_cmsg("~C91#WARN:~C00 no data in %s", $table_name);                    
                 else
                    ksort($map);
+                $invalid = 0;
+                foreach ($map as $key => $rec) {
+                    [$open, $close, $high, $low, $volume, $trades] = $rec;
+                    $ivf = max($open, $close, $low) > $high;
+                    $ivf |= min($open, $close, $high) < $low;
+                    if ($ivf) {
+                        log_cmsg("~C31#ERROR:~C00 invalid daily candle %s: %s", gmdate(SQL_TIMESTAMP, $key), json_encode($rec));
+                        $dts = gmdate(SQL_TIMESTAMP, $key);
+                        $mysqli_df->try_query("DELETE FROM $table_name WHERE DATE(ts) = '$dts'");
+                        $invalid ++;
+                    }
+                }
+                if ($invalid > 0)
+                    return [];
+
                 return $map;                
             }
             return null;

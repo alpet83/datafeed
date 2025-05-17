@@ -154,8 +154,7 @@
                 if ('te' == $code || 'tu' == $code) {                        
                     $tick = $data[2] ?? null;
                     if ($this->VerifyRow($tick)) {
-                        $downloader->ws_raw_data []= $data;                      
-                        
+                        $downloader->ws_raw_data []= $tick;
                     }
                     else
                         log_cmsg("~C31#WS_UPDATE:~C00 not a tick?: %s", print_r($tick, true));
