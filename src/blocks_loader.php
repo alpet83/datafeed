@@ -13,6 +13,19 @@
             $active_loader->ProcessPause($us);
     }    
 
+    /**
+     * function same_values: compare two float values with tolerance under and over in percents
+     * if a > b diff will positive and compared with pp_over
+     * if a < b diff will negative and compared with pp_under
+    */
+    function same_values(float $a, float $b, float $pp_under = -0.01, float $pp_over = 0.01) {
+        if ($a == $b) return true;
+        $pp_diff = 100 * ($a - $b) / max(abs($a), abs($b));
+        if ($pp_diff < 0 && $pp_diff > $pp_under) return true;
+        if ($pp_diff > 0 && $pp_diff < $pp_over) return true;
+        return false;
+    }
+
     /** 
      * BlockDataDownloader class - загрузчик данных по блокам, где каждый блок имеет временной диапазон (например день или больше). 
      * Основной функционал: восстановление исторических данных в БД, через синхронную загрузку оных через REST API
@@ -194,7 +207,7 @@
             $delay = 100000;
             $t_start = pr_time();            
             $delay = 15 * 1000000 / ($avail + 1); // progressive delay in microseconds                               
-            $limiter->Wait($delay, 'usefull_wait');                                 
+            $limiter->Wait($delay, 'shadow_work');                                 
             if (time() < $rest_allowed_ts) {
                 $avail = 0;
                 usefull_wait (3000000);
@@ -206,9 +219,11 @@
             $this->last_api_wait = $rq_start - $t_start;
             $this->last_api_request = $rqs;
             $opts = clone $curl_default_opts;
-            if ($this->current_interval < SECONDS_PER_DAY) {
+            if ($this->current_interval < SECONDS_PER_DAY && $this->last_api_wait < 10) {  // check shadow_work not very heavy
                 $opts->wait_func = 'shadow_work';     // need load WebSocket incoming data fast as possible, while intraday history download
-                $this->shadow_jobs = 2;
+                $opts->connect_timeout = 120;
+                $opts->total_timeout = 120;
+                $this->shadow_jobs = 2;                
             }
             $res = curl_http_request($rqs, null, $opts);
             $this->last_api_headers = $curl_resp_header;
@@ -231,7 +246,7 @@ SKIP_DOWNLOAD:
             if (strlen($res) < 256)
                 $cache_for = 3600; // small response, cache for 1 hour
             $this->last_requests [$t_now + $cache_for] = $rqs; // save as non-failed            
-            if (!$cache_file) return $res;
+            if (!$cache_file  || strlen($res) < 3) return $res;
 
             $today = date('Y-m-d'); // за текущий день слишком много запросов
             $forward = str_in($rqs_dbg, 'reverse=false') || str_in($rqs_dbg, 'sort=1');
@@ -877,8 +892,9 @@ SKIP_CHECKS:
                         }
                         $oldest_ms = $mini_cache->oldest_ms();                         
                         $newest_ms = $mini_cache->newest_ms();
+                        $block->FillRange ($oldest_ms, $newest_ms); // force remove unfilled                
                         $key_first = $cache->firstKey();
-                        $key_last = $cache->lastKey();                        
+                        $key_last = $cache->lastKey();                                
 
                         if ($block->recovery && 0 == count($block)) {  // по логике запроса таких блоков, хотя-бы одна запись должна быть загружена, иначе в его временном диапазоне вакуум                       
                             $first_keys = array_slice($mini_cache->keys, 0, 5);
@@ -1128,6 +1144,9 @@ SKIP_CHECKS:
         }        
 
         public function ProcessPause(int $us) {  usefull_wait($us); }
+        public function ProcessTasks(bool $fast = false) {
+
+        }
 
         public function PrepareDownload() {
             
@@ -1217,7 +1236,8 @@ SKIP_CHECKS:
                 if (0 == $this->loaded_blocks && 0 == $this->zero_scans && $mgr->cycles < 10 && $load_history)
                     log_cmsg("~C34#REST_DOWNLOAD:~C00 too small blocks to download for %s, scaning...", $this->ticker);                    
                 $this->PrepareDownload();
-                $n_blocks = count($this->blocks);                             
+                $n_blocks = count($this->blocks);          
+                $this->ProcessPause(100000); // processing internal tasks if no blocks to download
             }
             
             $limiter = $mgr->rate_limiter;

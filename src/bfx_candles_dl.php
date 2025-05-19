@@ -141,8 +141,6 @@
         }
 
         public function LoadDailyCandles(int $per_once = 1000, bool $from_DB = true): ?array { 
-
-
             $res = parent::LoadDailyCandles($per_once, $from_DB); // used for limiting
             // if (is_array($res) && count($res) > 0)  return $res;
             $this->SaveToDB($this->cache); // flush cache before filling            

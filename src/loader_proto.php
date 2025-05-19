@@ -8,6 +8,7 @@
     const DL_FLAG_REALTIME = 0x02;
     const DL_FLAG_REPAIRS  = 0x04;  // scan for repair
     const DL_FLAG_REPLACE  = 0x08;  // allow remove data (cleanup block)
+    const DL_FLAG_COMBINE  = 0x10;  // combine data into higher time frame, ticks => candles
 
     const DEBUGGING = true;
 

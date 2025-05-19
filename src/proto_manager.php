@@ -363,7 +363,8 @@
             $full_loaded = 0;
             $total_blocks = 0;
             if ($minute <= 58.5 && time() > $rest_allowed_t) 
-                foreach ($this->loaders as $pair_id => $loader) {                                 
+                foreach ($this->loaders as $pair_id => $loader) {
+                    $loader->ProcessTasks();                                 
                     if (!($loader instanceof BlockDataDownloader) || !$loader->IsHistorical()) continue;        
                     $total_blocks += $loader->BlocksCount();
                     $data_lag = time() - max($loader->last_block->max_avail, $loader->ws_newest);

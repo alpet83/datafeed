@@ -20,6 +20,8 @@
 
         public     array $refilled_vol = [];
         public     array $unfilled_vol = [];
+
+        public     ?string $time_strict = null;
         
         public function __construct(BlockDataDownloader|null $loader, int $start = 0, int $end = 0) {
             parent::__construct($loader, $start, $end);
@@ -84,6 +86,16 @@
         }
         public function Count(): int {
             return count($this->cache_map);
+        }
+
+        public function FillRange(int $start_tms, int $end_tms) {
+            foreach ($this->unfilled_vol as $m => $v) {
+                $min_start = $m * 60000;
+                $min_end = $min_start + 60000 - 1;                
+                // если минутка входит в диапазон целиком, её можно считать заполненной
+                if ($start_tms <= $min_start && $min_end < $end_tms)  
+                    unset($this->unfilled_vol[$m]);
+            }
         }
 
         public function FormatProgress(): string {

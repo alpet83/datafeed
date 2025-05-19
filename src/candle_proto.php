@@ -67,9 +67,18 @@
             //*/
 
             if (strlen($this->table_create_code) < 10)
-                throw new Exception("~C91#ERROR:~C00 table {$this->table_name} code not retrieved: ".var_export($this->table_create_code, true));
+                throw new Exception("~C91#ERROR:~C00 table {$this->table_name} code not retrieved: ".var_export($this->table_create_code, true));            
             
-            
+            if (!str_in($this->table_create_code, 'PRIMARY KEY')) {
+                log_cmsg("~C31#WARN:~C00 table %s has no PRIMARY KEY (lost on import?), trying to add", $this->table_name);
+                $query = "RENAME TABLE $table_name TO {$table_name}__old";
+                $copy = "INSERT IGNORE INTO $table_name SELECT * FROM {$table_name}__old";
+                if ($mysqli->query($query) &&
+                    $this->CreateTables() && $mysqli->query($copy)) {
+                    log_cmsg("~C92#TABLE_UPGRADE:~C00 table %s recreated, copied %d rows", $this->table_name, $mysqli->affected_rows);
+                    $mysqli->query("DROP TABLE {$table_name}__old");
+                }
+            }
 
             $query = "ALTER TABLE {$this->table_name} ADD `flags` INT UNSIGNED NOT NULL DEFAULT '0' AFTER `volume`";                                    
             if ( !str_in($this->table_create_code, 'flags')) {  // в таблице нет 7-ой колонки?
@@ -91,6 +100,8 @@
 
                 if (!str_in($ch_code, 'flags') && $stmt = $chdb->write($query))
                      log_cmsg("~C93#TABLE_UPGRAGE(ClickHouse):~C00 current code: %s", $this->table_create_code_ch);                
+
+                $chdb->write("ALTER  TABLE {$this->table_name} DROP COLUMN IF EXISTS orders;");
 
             }
 
@@ -430,10 +441,11 @@
                 $invalid = 0;
                 foreach ($map as $key => $rec) {
                     [$open, $close, $high, $low, $volume, $trades] = $rec;
-                    $ivf = max($open, $close, $low) > $high;
-                    $ivf |= min($open, $close, $high) < $low;
+                    $ivf = '';
+                    $ivf .= max($open, $close, $low) > $high ? 'O/C/L > H' : '';
+                    $ivf .= min($open, $close, $high) < $low ? 'O/C/H < L' : '';
                     if ($ivf) {
-                        log_cmsg("~C31#ERROR:~C00 invalid daily candle %s: %s", gmdate(SQL_TIMESTAMP, $key), json_encode($rec));
+                        log_cmsg("~C31#ERROR:~C00 invalid daily candle %s: %s, %s", gmdate(SQL_TIMESTAMP, $key), json_encode($rec), $ivf);
                         $dts = gmdate(SQL_TIMESTAMP, $key);
                         $mysqli_df->try_query("DELETE FROM $table_name WHERE DATE(ts) = '$dts'");
                         $invalid ++;

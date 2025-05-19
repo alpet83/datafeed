@@ -24,6 +24,9 @@
 
         protected $flush_count = 0;
 
+        protected $rebuild_time_last = 0;
+
+        protected $rebuild_task = null;
             
         public function __construct(DownloadManager $mngr, stdClass $ti) {
             $this->import_method = 'ImportTicks';
@@ -302,6 +305,8 @@
                 $this->FlushCache(); // TODO: check completion calling after
             }
 
+            $mysqli = sqli();
+
             $saldo_volume = $block->SaldoVolume();                
             $check = sqli_df()->select_row('DATE(ts) as date, SUM(amount) as volume, MIN(price) as low, MAX(price) as high, COUNT(*) as count', $this->table_name, 
                                 "FINAL WHERE DATE(ts) = '$day' AND amount > 0 GROUP BY DATE(ts) LIMIT 1; -- check", MYSQLI_OBJECT);
@@ -313,7 +318,7 @@
 
             $s_info = 'postponed for verify/retry, ';
 
-            $attempts = sqli()->select_value('COUNT(*)', 'download_history', 
+            $attempts = $mysqli->select_value('COUNT(*)', 'download_history', 
                                               "WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (date = '$day')");                                                
         
             $db_diff = $saldo_volume - $check_volume;                 
@@ -328,28 +333,43 @@
             $whole_load = false;
             $recv = 0;
             $need_recovery = $check_volume > min($block->target_volume, $block->minutes_volume);
+            $block->time_strict = ''; // autodetect available time range
+            if ($saldo_volume >= $block->target_volume)
+                $block->time_strict = "DATE(ts) = '$day'";
+
             if ($this->reconstruct_candles && $block->index >= 0 && $need_recovery)
                 $recv = $this->RecoveryCandles($block, $check_volume,true);  // recovery absent minute candles
 
+            // для тиков целевой объем должен быть меньше или равен набранному, плюс минус погрешность-толерантность
+            // исключение: удалось произвести апгрейд свечей 
+            $inaccuracy = 0.01; // погрешность суммирования float с очень разным порядком 0.01%                
+            $good_enough = abs($diff_pp) < $this->volume_tolerance;    
+            $good_enough &= $recv > 0 || $diff_pp + $inaccuracy >= 0;
+
             // избавиться от повтора загрузки, при наличии приличий...    
-            if (abs($diff_pp) < $this->volume_tolerance || $attempts >= 2 || $recv > 0)  {
-                sqli()->try_query("DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (date = '$day')");                
-                $s_info = '';
+            if ($good_enough || $attempts >= 2 || $recv > 0)  {
+                $replica = $mysqli->replica;
+                $res = $mysqli->try_query("DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (date = '$day')");                
+                $afr = $mysqli->affected_rows;
+                if ($replica) {
+                    $afr += $replica->affected_rows;
+                    $s_info .= "RDBG: {$replica->last_query}, ";
+                }
+                $s_info = $res ? sprintf('removed from scheduler(s) %d, ', $afr) : "~C91 failed~C00 remove '$day' from scheduler(s): {$mysqli->error}, ";
             }                
            
             $load_result = 'full-filled';
             $this->mini_cache = null;
             $this->ProcessAggregate();
 
-            // для тиков целевой объем должен быть меньше или равен набранному, плюс минус погрешность-толерантность
-            // исключение: удалось произвести апгрейд свечей 
-            $inaccuracy = 0.01; // погрешность суммирования float с очень разным порядком 0.01%
-            if (abs($diff_pp) < $this->volume_tolerance && ($recv > 0 || $diff_pp + $inaccuracy >= 0)) {
+
+            if ($good_enough) {
                 $whole_load = true;
-                log_cmsg("$prefix($symbol/$index/$attempts):~C00 %s, attempts %d, %s,\n\t\ttarget_volume reached %s in %d ticks, block summary %s, sess. time spent %.1f min, filled in session: %s ", 
-                            strval($block), $attempts, $block->info, format_qty($check_volume), $count, json_encode($check), $block->sess_load_time, $filled);    
+                $summary = is_object($check) && $check instanceof mysqli_row  ? strval($check) : json_encode($check);
+                log_cmsg("$prefix($symbol/$index/$attempts):~C00 %s, attempts %d, %s,\n\t\ttarget_volume reached %s in %d ticks, block summary %s, sess. time spent %.1f min, $s_info filled in session: %s ", 
+                            strval($block), $attempts, $block->info, format_qty($check_volume), $count, $summary, $block->sess_load_time, $filled);    
                 if (-1 == $block->index)
-                     $this->RecoveryCandles($block, $check_volume);  // upgrade latest
+                    $this->RecoveryCandles($block, $check_volume);  // upgrade latest
                 
             } elseif ($block instanceof TicksCache) {
                 $whole_load = $diff < 0;
@@ -506,65 +526,119 @@
 
         public function ProcessPause(int $us) {                        
             parent::ProcessPause($us);
-            if (0 == $this->shadow_jobs) return;
-            $this->shadow_jobs --;
-
+            if (0 == $this->shadow_jobs) return;            
+            $t_start = pr_time();
             $this->ProcessAggregate();            
-            $rbc = sqli()->select_row('date,target_volume', 'download_schedule',
-                                        "WHERE (ticker = '{$this->ticker}') AND (kind = 'rebuild-c') LIMIT 1", MYSQLI_OBJECT);
-            if ($rbc)
-                $this->RebuildCandles($rbc->date, $rbc->target_volume);
+            $this->ProcessTasks(true);           
+
+            $elps = pr_time() - $t_start;
+            if ($elps >= 0.5)
+                $this->shadow_jobs = 0;
+            else
+                $this->shadow_jobs --;
         }
 
-        /** Rebuild candles from ticks full day load from DB  */
-        protected function RebuildCandles(string $date, float $target_vol) {
+        public function ProcessTasks(bool $fast = false) {
+            $rbc = $this->rebuild_task ?? sqli()->select_row('date,target_volume', 'download_schedule',
+                                                             "WHERE (ticker = '{$this->ticker}') AND (kind = 'rebuild-c') LIMIT 1", MYSQLI_OBJECT);
+            $mgr = $this->get_manager();               
+            $timeout = 30;                                              
+            while ($rbc && $this->rebuild_time_last < 10 && $mgr->active) {
+                set_time_limit(50);
+                $res = $this->RebuildCandles($rbc);
+                $this->rebuild_task = $res ? null : $rbc; // continue later if not finished                    
+                if ($fast || $res) break; 
+                $mgr->ProcessWS(false);
+                if ($timeout-- <= 0) {
+                    log_cmsg("~C91 #ERROR:~C00 deadlock in rebuild task %s for %s", $rbc->date, $this->ticker);
+                    break;
+                }
+            }
+        }
+
+        /** Rebuild candles from ticks full day load from DB. 
+         * returns true if finished day
+          */
+        protected function RebuildCandles(\stdClass $job): bool {
             $mysqli_df = sqli_df();
+            $hour = $job->hour ?? 0;
+            $date = $job->date;
+            $target_vol = $job->target_volume; 
+
             $src = $this->table_name;    
             $saldo_vol = 0;        
-            $saldo_elps = 0;
+            $saldo_elps = $job->elapsed ?? 0;
+
             $candles_table = str_replace('ticks', 'candles', $this->table_name);
-            for ($h = 0; $h < 24; $h++) {
-                $t_start = pr_time();
+            $time_strict = '';
+            $part_id = date('Ym01', strtotime($date));
+            for ($h = $hour; $h < 24; $h++) {
+                $job->hour = $h + 1; // for next iteration if not finished now
+                
+                $t_start = pr_time();                                
+                $hour_start = sprintf("$date %02d:00:00", $h);
+                $hour_end = format_ts( strtotime($hour_start) + 3600 );
+                $time_strict = "(ts >= '$hour_start') AND ts < ('$hour_end')"; // seems its fast with index
                 $rows = $mysqli_df->select_map('trade_no, toUnixTimestamp(ts) * 1000 + toMillisecond(ts), buy, price, amount, trade_no', $src, 
-                                        "WHERE DATE(ts) = '$date' AND HOUR(ts) = $h", MYSQLI_NUM);
-                if (0 == count($rows)) continue;                                                      
+                                        "WHERE _partition_id = '$part_id' AND $time_strict", MYSQLI_NUM);
+                if (0 == count($rows))                    
+                    continue;                                                      
+                
                 foreach ($rows as $k => $row) {
                     $rows[$k][TICK_TMS] = $row[TICK_TMS] * 1; 
                     $rows[$k][TICK_PRICE] = $row[TICK_PRICE] * 1;
                     $rows[$k][TICK_AMOUNT] = $row[TICK_AMOUNT] * 1;
                     $rows[$k][TICK_BUY] = $row[TICK_BUY] * 1; 
                 }
-
+                $t_load = pr_time() - $t_start;
                 $mc = new TicksCache($this);
                 $mc->key = $date;
                 $mc->target_volume = $target_vol; // prevent upgrade daily volume here
                 $mc->Import($rows);
                 $volume = $mc->SaldoVolume();
                 $saldo_vol += $volume;
-                $this->RecoveryCandles($mc, 0, true); // rebuild for single hour
+                $mc->time_strict = $time_strict;
+                $mc->index = 1000 + $h; // marking visual
+                $this->RecoveryCandles($mc, $volume, true); // rebuild for single hour
                 $this->ProcessAggregate($mc); // rebuild 1s candles
                 $elps = pr_time() - $t_start;
                 $saldo_elps += $elps;
-                if ($elps > 1)
-                    log_cmsg("~C96#PERF_REBUILD_CANDLES:~C00 hour %02d loaded %7d ticks, %s volume, elapsed: %.3f s", 
-                            $h, count($rows), format_qty($volume), $elps);                            
+                $job->elapsed = $saldo_elps;                
+                $this->rebuild_time_last = $elps;
+                
+                if ($elps > 0.5) {
+                    log_cmsg("~C96#PERF_REBUILD_CANDLES:~C00 hour %02d loaded %7d ticks, %s volume, strict %s, load time %.3f, summary %.3f ", 
+                            $h, count($rows), format_qty($volume), $mc->time_strict, $t_load, $elps);                            
+                    break;
+                }                
             }            
+            
+            if ($job->hour < 24) return false; 
+            set_time_limit(55);
+            $this->SaveMiniCandles($this->candles_b1s);
+            $this->SaveMiniCandles($this->candles_s1s);
+            $this->ReleaseMiniCandles($this->candles_b1s, $date);
+            $this->ReleaseMiniCandles($this->candles_s1s, $date);
+
             $query = "UPDATE {$candles_table}__1D SET `volume` = GREATEST(`volume`, $saldo_vol) WHERE Date(`ts`) = '$date';";
             sqli()->try_query($query);
             $query = "DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'rebuild-c') AND (date = '$date');";
             sqli()->try_query($query);
-            log_cmsg("~C96#REBUILD_CANDLES:~C00 %s, saldo volume %s, elapsed %.3f s", 
-                    $date, format_qty($saldo_vol), $saldo_elps);
+            log_cmsg("~C96#REBUILD_CANDLES:~C00 %s, saldo volume %s, last strict %s, elapsed %.3f s", 
+                    $date, format_qty($saldo_vol), $time_strict, $saldo_elps);
+            return true;            
         }
 
         protected function ReconstructCandles(array $source, int $period = 60, mixed $exclude = null): array {
-            $c_map = []; // candles result            
+            $c_map = []; // candles result         
+            $saldo_tv = 0;   
             foreach ($source as $tick) {
                 $tk = floor($tick[TICK_TMS] / $period / 1000) * $period; // round to minute into seconds                
                 $tp = $tick[TICK_PRICE];
-                $tv = $tick[TICK_AMOUNT];
+                $tv = $tick[TICK_AMOUNT];                
                 if ($tick[TICK_BUY] === $exclude) continue; // for separate candles
 
+                $saldo_tv += $tv;
                 if (!isset($c_map[$tk])) 
                     $c_map[$tk] = [$tp, $tp, $tp, $tp, $tv]; // all prices equal OCHL
                 else { 
@@ -575,23 +649,35 @@
                 }
             } // aggregation cycle
             ksort($c_map);
+            $saldo_cv = 0;
+            foreach ($c_map as $tk => $rec) 
+                $saldo_cv += $rec[CANDLE_VOLUME];
+
+            $side = $exclude ? 'sell' : ($exclude !== null ? 'buy' : 'both');
+
+            if ($saldo_cv < $saldo_tv * 0.999) 
+                log_cmsg("~C31#WARN_VOLUME_LOW(ReconstructCandles):~C00 saldo volume %s vs ticks source %s, side %s", 
+                            format_qty($saldo_cv), format_qty($saldo_tv), $side);
+                
+
             return $c_map;
         }
 
-        protected function RecoveryCandles(TicksCache $block, float $ticks_volume, bool $reconstruct = false) {
+        protected function RecoveryCandles(TicksCache $source, float $ticks_volume, bool $reconstruct = false) {
             global $mysqli, $mysqli_df;
-            if (0 == count($block)) return;
-            $start = $block->oldest_ms();
-            $end  = $block->newest_ms();
-            $date = $block->key;
-            $candles_table = str_replace('ticks', 'candles', $this->table_name);
-            $source = $block->Export();            
-            $m_start = floor(time_ms() / 60000) * 60000;            
+            if (0 == count($source)) return;
+            $start = $source->oldest_ms();
+            $end  = $source->newest_ms();
+            $idx = $source->index;            
+            $date = $source->key;
+            $ticks = $source->Export();
+            $candles_table = str_replace('ticks', 'candles', $this->table_name);                                            
             $updated = 0;
 
-            if (-1 == $block->index) {
+            if (-1 == $idx) {
+                $m_start = floor(time_ms() / 60000) * 60000;
                 $latest = [];
-                foreach ($source as $tick) 
+                foreach ($ticks as $tick) 
                     if ($tick[TICK_TMS] >= $m_start) 
                         $latest []= $tick;                    
                 $c_map = $this->ReconstructCandles($latest);                                
@@ -607,65 +693,121 @@
             }
             
             if (!$reconstruct) return $updated;
-            $t_start = pr_time();
-            $source = $block->Export();
-            $ticks_count = count($source);
-            $c_map = $this->ReconstructCandles($source);
-            $start_ts = date_ms(SQL_TIMESTAMP, $start);
-            $end_ts = date_ms(SQL_TIMESTAMP, $end);
-            $strict = "ts >= '$start_ts' AND ts <= '$end_ts'";
+            
+            if (null == $source->time_strict && $idx >= 1000) {
+                log_cmsg("~C31 #STRANGE:~C00 unset time_strict for hourly period recovery, index %d, stack: %s", $idx, format_backtrace());            
+                $source->time_strict = sprintf("DATE(ts) = '%s' AND HOUR(ts) = %d", $date, $idx - 1000);
+            }
+            $tmr = new ProfileTimer();
+            
+            $ticks_count = count($ticks);
+            $c_map = $this->ReconstructCandles($ticks);
+            $start_t = floor($start / 60000) * 60; // round to minute into seconds
+            $end_t   = ceil($end / 60000) * 60;
+            $start_ts = format_ts( $start_t);            
+            $end_ts = format_ts( $end_t);
+            $tmr->add('calc');
+
+            $strict = strlen($source->time_strict) > 10 ? $source->time_strict : "ts >= '$start_ts' AND ts < '$end_ts' -- autodetect";
+                        
             $exists = $mysqli->select_map('ts,volume', $candles_table, "WHERE $strict");
+            $tmr->add('load');
             $rows = [];            
-            $info = "EXISTS {$block->key}: ". print_r($exists, true);
+            $info = "EXISTS {$source->key}: ". print_r($exists, true);
             $info .= "UPGRADE: ".print_r($c_map, true);
             $mgr = $this->get_manager();
+            $prev_vol = 0;
+            foreach ($exists as $vol)
+                $prev_vol += $vol;
+
+            $upgrade_pp = ($prev_vol > 0) ? 100 * $ticks_volume / $prev_vol - 100 : 100;
+
+            if ($ticks_volume > 0 && $upgrade_pp <= 0.001) // float inaccuracy 0.001%
+                return;             
 
             file_put_contents("{$mgr->tmp_dir}/candles_recovery_{$this->ticker}.txt", $info);                        
+            $insert_vol = 0;
             foreach ($c_map as $tk => $rec) {
                 $ts = format_ts($tk);
                 [$o, $c, $h, $l, $v] = $rec;
                 if (isset($exists[$ts])) $updated ++;              
                 $rows []= "('$ts', $o, $c, $h, $l, $v)"; // insert/update lost candle
-            }
-            
+                $insert_vol += $v;
+            }          
             
             if (count($rows) > 0) {
                 $query = "INSERT INTO $candles_table (`ts`, `open`, `close`, `high`, `low`,`volume`) VALUES ";
-                $query .= implode(",\n", $rows);                
+                $query .= implode(",\n", $rows);      
+                         
                 $res_c = $mysqli_df->try_query($query); // always overwrite existed candles via ReplacingMergeTree
-                $query .= "\n ON DUPLICATE KEY UPDATE `open` = VALUES(`open`), `close` = VALUES(`close`), `high` = VALUES(`high`), `low` = VALUES(`low`), `volume` = VALUES(`volume`)";
+                $query .= "\n ON DUPLICATE KEY UPDATE `open` = VALUES(`open`), `close` = VALUES(`close`),";
+                $query .= " `high` = VALUES(`high`), `low` = VALUES(`low`), `volume` = VALUES(`volume`)";
+                // $query .= "\n\t`high` = GREATEST(`high`, VALUES(`high`)), `low` = LEAST(`low`, VALUES(`low`)), `volume` = GREATEST(`volume`, VALUES(`volume`))";
                 $res_m = $mysqli->try_query($query);         
-                $elps = pr_time() - $t_start;           
+                $tmr->add('insert');
+                $timings = '~C00'.$tmr->dump(0.1, 'format_color').format_color(' total %.1f s', $tmr->elapsed());
                 $inserted = count($rows) - $updated;
                 if ($inserted > 0)
-                    log_cmsg("~C92#RECOVERY_CANDLES:~C00 %d missed candles inserted, %d updated in %s, for MySQL %s, ClickHouse %s, time %.1f sec", 
-                                $inserted, $updated, $candles_table, b2s($res_m), b2s($res_c), $elps);
+                    log_cmsg("~C92#RECOVERY_CANDLES($idx):~C00 %d missed candles inserted, %d updated in %s, volume change %s => %s, for MySQL %s, ClickHouse %s, timings: %s", 
+                                $inserted, $updated, $candles_table, format_qty($prev_vol), format_qty($ticks_volume),
+                                 b2s($res_m), b2s($res_c), $timings);
                 else
-                    log_cmsg("~C92#RECOVERY_CANDLES:~C00 %d candles updated in %s", $updated, $candles_table);            
+                    log_cmsg("~C92#RECOVERY_CANDLES($idx):~C00 %d candles updated in %s, volume change %s => %s (+%.3f%%), for MySQL %s, ClickHouse %s, timings: %s",
+                                $updated, $candles_table, format_qty($prev_vol), format_qty($ticks_volume), $upgrade_pp,
+                                b2s($res_m), b2s($res_c), $timings);            
                 
-                if ($ticks_volume > $block->target_volume ) {
-                    $query = "UPDATE {$candles_table}__1D SET `volume` = $ticks_volume WHERE Date(`ts`) = '$date';";
+                $daily_table = "{$candles_table}__1D";
+
+                if ($ticks_volume > $source->target_volume ) {
+                    $query = "UPDATE $daily_table SET `volume` = GREATEST(`volume`, $ticks_volume) WHERE Date(`ts`) = '$date';";
                     if ($mysqli->try_query($query)) {
-                        $diff_pp = 100 * $ticks_volume / max(1, $block->target_volume);
-                        log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s__1D: daily candle %s volume upgraded to %s %.1f%% ", 
-                                    $candles_table, $date, format_qty($ticks_volume), $diff_pp);
+                        $diff_pp = 100 * $ticks_volume / max(1, $source->target_volume);
+                        log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s: daily candle %s volume upgraded to %s %.1f%% ", 
+                                    $daily_table, $date, format_qty($ticks_volume), $diff_pp);
                     }
                     else
                         log_cmsg("~C31#WARN_FAILED_UPDATE:~C00 %s__1D: daily candle volume still unchanged", $candles_table);
-                }
+                }                
 
-                if ($ticks_count > $block->target_count) {
-                    $query = "UPDATE {$candles_table}__1D SET `trades` = $ticks_count  WHERE Date(`ts`) = '$date';";    
-                    $mysqli->try_query($query);
-                }
+                
                 $query = "INSERT IGNORE INTO `download_schedule` (`date`, `kind`, `ticker`, `target_volume`, `target_count`)\n VALUES";
                 $query .= sprintf("('%s', 'sync-c', '%s', %f, 0)", 
-                                 $block->key, $this->ticker, $ticks_volume);
+                                 $source->key, $this->ticker, $ticks_volume);
                 $mysqli->try_query($query); // загрузчик свечей в свою очередь осуществит синхронизацию данных в ClickHouse
                 $stats_table = $this->stats_table;
                 // INSERT INTO $stats_table (`date`, `day_start`, `day_end`, `volume_minutes` TODO: надо видимо вставлять запись, для предупреждения загрузчика свечей
-                $query = "UPDATE $stats_table SET repairs = repairs + 1 WHERE `date` = '$date' "; 
-                $mysqli->query($query);
+                $cover_hours = ($end_t - $start_t) / 3600;
+                if ($cover_hours > 1) {
+                    $query = "UPDATE $stats_table SET repairs = repairs + 1 WHERE `date` = '$date' "; 
+                    $mysqli->query($query);
+                }
+
+                if ($ticks_count > $source->target_count && $source->target_count > 0) {
+                    $query = "UPDATE $daily_table SET `trades` = GREATEST(`trades`, $ticks_count)  WHERE Date(`ts`) = '$date';";    
+                    $mysqli->try_query($query);
+                }
+                $first_t = array_key_first($c_map);
+                $last_t = array_key_last($c_map);
+                $range = sprintf("`ts` >= '%s' AND `ts` <= '%s'", format_ts($first_t), format_ts($last_t)); 
+                $control = $mysqli->select_map('ts, volume', $candles_table, "WHERE $strict") ?? [];
+                $ctrl_vol = 0;
+                $diffs = [];
+                foreach ($control as $ts => $volume) {
+                    $prev = $check[$ts] ?? 0;
+                    $rec = $c_map[strtotime($ts)] ?? [0, 0, 0, 0, 0];
+                    $upd = $rec[CANDLE_VOLUME] ?? 0; 
+                    $ctrl_vol += $volume;
+                    if (!same_values($volume, $upd))
+                        $diffs[$ts] = format_qty($prev) . '=>'. format_qty($upd). '=>'. format_qty($volume);
+                }       
+                
+                $diff_vol = $ctrl_vol - $insert_vol;
+                $diff_pp = 100 * $diff_vol / max($ctrl_vol, $insert_vol);
+                if (abs($diff_pp) > 0.2) {
+                    log_cmsg("~C31#WARN_SYNC_MISTMATCH:~C00 after checking volume diff %.2f%%, candles %s vs prev %s vs insert %s, produced range %s vs strict %s, diffs: %s", 
+                                            $diff_pp, format_qty($ctrl_vol), format_qty($prev_vol), format_qty($insert_vol),
+                                            $range, $strict, json_encode($diffs));
+                }
             }
             else    
                 log_cmsg("~C33#RECOVERY_CANDLES:~C00 no candles generated for update %s from %d ticks", $candles_table, $ticks_count);
@@ -766,25 +908,26 @@
             $today = gmdate('Y-m-d');
             $mgr = $this->get_manager();
             
-            if (0 == $this->scan_year)
-                $this->scan_year = date('Y');
-            else    
-                $this->scan_year --;
-            
-            $year = $this->scan_year;
+            $this->scan_year ++;
+            $base = 2012 + date('n');            
+            $years = date('Y') - 2012 + 1;
+            $year = 2012 + ($this->scan_year + $base) % $years;
 
             $month = date('g'); // scan single partition on DB - better efficiency. Full history covered twice per day
             $start = max($start, strtotime(HISTORY_MIN_TS));                                  
             $start = max($start, $this->history_first);
             $single = strtotime("$year-$month-01");            
 
-            if ($single < $start) { // ненужно сканировать глубже
+            if ($this->scan_year > $years) { // ненужно сканировать больше
                 $this->zero_scans ++;                
                 return;     
             }
 
-            $ts_start = format_ts($start);
+            $ts_start = format_ts($start);            
             log_cmsg("~C96#PERF(ScanIncomplete):~C00 gathering stats for %s, checking period %d-%02d, ts_start = %s", $table_name, $year, $month, $ts_start);
+            $bad_candles = [];
+            $sched_rows = [];
+
 RESTART:                
                             
             $skips = [0, 0, 0, 0];
@@ -793,23 +936,30 @@ RESTART:
             $control_map = [];
             // control ClickHouse candles by MySQL daily candles
             $columns = 'DATE(ts) as date, MIN(ts) as min, MAX(ts) as max, SUM(volume) as volume, COUNT(*) as count';            
-            $ref_map = $mysqli->select_map($columns, $candle_tab, "WHERE $period AND volume > 0 GROUP BY DATE(ts)", MYSQLI_OBJECT) ?? [];                
+            $control_map = $mysqli->select_map($columns, $candle_tab, "WHERE $period AND volume > 0 GROUP BY DATE(ts) -- control_map", MYSQLI_OBJECT) ?? [];                
             // контрольная таблица - минутные свечи, что позволяет определить диапазон времени, в котором есть данные
             if ($mysqli_df->table_exists($candle_tab))  {                                     
-                $control_map = $mysqli_df->select_map($columns, $candle_tab, "FINAL WHERE $period AND volume > 0 GROUP BY DATE(ts) -- control_map", MYSQLI_OBJECT) ?? [];                
-                foreach ($ref_map as $day => $rec) 
+                $ref_map = $mysqli_df->select_map($columns, $candle_tab, "FINAL WHERE $period AND volume > 0 GROUP BY DATE(ts) -- ref_map", MYSQLI_OBJECT) ?? [];                
+                foreach ($ref_map as $day => $rec)  { 
+                    $day_ex = $extremums[$day] ?? null;
                     if (isset($control_map[$day])) {
-                        $diff = $rec->volume - $control_map[$day]->volume; // positive means ClickHouse has less volume
-                        $diff_pp = 100 * $diff / max($rec->volume, $control_map[$day]->volume, 0.01);
-                        if ($diff_pp > 0.1) {
-                            log_cmsg("~C31 #WARN:~C00 candles volume mismatch for ClickHouse %s: %s vs MySQL %s, diff = %.1f%%", $day, format_qty($control_map[$day]->volume), format_qty($rec->volume), $diff_pp);
-                            $control_map[$day] = $rec;
+                        $mysql_vol = $control_map[$day]->volume;
+                        $chdb_vol =  $rec->volume; 
+                        $diff = $mysql_vol - $chdb_vol;
+                        $diff_pp = 100 * $diff / max($chdb_vol, $mysql_vol, 0.01);
+                        if (abs($diff_pp) > 0.1) {
+                            log_cmsg("~C31 #WARN:~C00 candles volume mismatch for ClickHouse %s: %s vs MySQL %s, diff = %.1f%%", 
+                                        $day, format_qty($chdb_vol), format_qty($mysql_vol), $diff_pp);                            
+                            $sched_rows []= sprintf("('%s', 'sync-c', '%s', %f, 0)", $day, $this->ticker, $mysql_vol);
                         }
                     }
-                    else  {  
-                        log_cmsg("~C31 #WARN:~C00 in ClickHouse absent day %s, need resync", $day);
+                    elseif (isset($rec->volume) )  {  
+                        log_cmsg("~C31 #WARN:~C00 in MySQL absent day %s, but avail in ClickHouse: %s ", $day, json_encode($rec));
                         $control_map[$day] = $rec;
+                        $bad_candles [$day] = $day_ex ? $day_ex->volume : $rec->volume;                        
                     }
+                }
+                
             }
             elseif (count($ref_map) > 0) {
                 log_cmsg("~C31 #WARN_NOT_SYNC:~C00 table %s not exists in ClickHouse, will used MySQL", $candle_tab);
@@ -866,7 +1016,7 @@ RESTART:
             $first_day = array_key_first($control_map);         
             $t_start = pr_time();       
 
-            $bad_candles = [];
+            
                  
             
             foreach ($control_map as $day => $cstat) {        
@@ -898,8 +1048,8 @@ RESTART:
                     $target_trades = $day_ex->trades;
                     $extra = $day_ex->volume - $candles_vol;
                     $extra_pp = 100 * $extra / max($candles_vol, $day_ex->volume);
-                    if ($extra_pp >= 0.1) {
-                        log_cmsg("~C31 #VOLUME_MISMATCH({$this->ticker}):~C00 for %s candles: saldo %s < daily %s, diff = %s (%.2f%%). Using from higher timeframe",
+                    if ( abs($extra_pp) >= 0.1) {
+                        log_cmsg("~C31 #VOLUME_MISMATCH({$this->ticker}):~C00 for %s candles: saldo %s != daily %s, diff = %s (%.2f%%). Using from higher timeframe",
                                 $day, format_qty($candles_vol), format_qty($day_ex->volume), format_qty($extra), $extra_pp); 
                         $candles_vol =  $day_ex->volume; // 1D table can be manually patched, means have max priority                    
                         $bad_candles [$day] = $candles_vol;                                
@@ -1018,7 +1168,7 @@ SKIP_SCAN:
             }
 
             $query = "INSERT IGNORE INTO `download_schedule` (date, kind, ticker, target_volume, target_close) VALUES ";
-            $rows = [];
+            $rows = $sched_rows;
             // полное отложенное расписание
             foreach ($rescan as $block) {
                 if ($block->IsFull()) continue; 
@@ -1033,7 +1183,7 @@ SKIP_SCAN:
             if (count($rows) > 0) {
                 $query .= implode(",\n", $rows);
                 if ($mysqli->query($query)) // WARN: need ignore replica
-                    log_cmsg("~C97#SCHEDULE:~C00 added %d / %d rows to schedule", $mysqli->affected_rows, count($rows));
+                    log_cmsg("~C97#SCHEDULE:~C00 for %s added %d / %d rows to scheduler on %s ", $this->ticker, $mysqli->affected_rows, count($rows), $mysqli->host_info);
             }
 
             $this->blocks_map = [];
@@ -1105,10 +1255,10 @@ SKIP_SCAN:
         echo ".\n";
         log_cmsg("~C97 #START:~C00 trying connect to DB...");
         $mysqli = init_remote_db(DB_NAME);
-        if (!$mysqli) {
-            log_cmsg("~C91 #FATAL:~C00 cannot initialze DB interface! ");
-            die("ooops...\n");
-        }   
+        if (!$mysqli) 
+            error_exit("~C91 #FATAL:~C00 cannot initialze DB interface! ");                    
+        if (MYSQL_REPLICA)
+            $mysqli->replica = init_replica_db(DB_NAME, [MYSQL_REPLICA]);
 
         $mysqli_df = ClickHouseConnectMySQL(null, null, null, DB_NAME);  
         if ($mysqli_df)

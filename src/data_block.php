@@ -177,36 +177,9 @@
             return $this->cache_map; // clone
         }
 
-
-        public function FillDummy() { 
-            $ts = false;                    
-            if (!method_exists($this, 'AddDummy')) return;
-
-            if (0 == $this->fills) {
-                log_cmsg("~C31#WARN:~C00 block %d:%s have no fills in session, no dummies added", $this->index, $this->key);                                                    
-                return;
-            }                
-            $fake = [];
-            if ($this->min_avail - $this->lbound > 180) {  // если gap больше 3 минут                
-                $this->AddDummy($this->get_lbound_ms()); // первый фейковый тик позволит избежать повторной загрузки                
-                $fake = [0];
-            }            
-
-            $hour = 0;
-            $cursor = round($this->lbound / 3600) * 3600; // округляем до часа
-            for ($hour = 1; $hour < $this->days_per_block * 24; $hour ++) {                                                            
-                $cursor = $this->lbound + $hour * 3600;                   
-                if ($cursor >= $this->rbound) break;                    
-                if (!isset($block->filled[$hour]) || 0 == $this->filled[$hour])  {
-                    $ts = format_ts($cursor);
-                    $this->AddDummy($ts);  // в этом часе не было тиков, добавить фейк
-                    $fake []= $hour;
-                }  
-            }                
-            if ($ts)
-                log_cmsg("~C94#FILL_DUMMY:~C00 block %d:%s, filled up to %s, %d ticks in cache, added fake hours [%s], last dummy ts %s", 
-                            $this->index, $this->key, format_ts($this->max_avail), count($this->cache_map),
-                            implode(',', $fake), $ts);
+        
+        public function FillRange(int $start_tms, int $end_tms) {
+            
         }
 
         public function Finished() {
