@@ -592,11 +592,11 @@
                 }
                 $t_load = pr_time() - $t_start;
                 $mc = new TicksCache($this);
-                $mc->key = $date;
-                $mc->target_volume = $target_vol; // prevent upgrade daily volume here
+                $mc->key = $date;                
                 $mc->Import($rows);
                 $volume = $mc->SaldoVolume();
                 $saldo_vol += $volume;
+                $mc->target_volume = max( $target_vol, $saldo_vol); // prevent upgrade daily volume here                
                 $mc->time_strict = $time_strict;
                 $mc->index = 1000 + $h; // marking visual
                 $this->RecoveryCandles($mc, $volume, true); // rebuild for single hour
@@ -735,6 +735,8 @@
                 $insert_vol += $v;
             }          
             
+            $target_vol = max($prev_vol,  $source->target_volume);
+
             if (count($rows) > 0) {
                 $query = "INSERT INTO $candles_table (`ts`, `open`, `close`, `high`, `low`,`volume`) VALUES ";
                 $query .= implode(",\n", $rows);      
@@ -763,14 +765,14 @@
                 
                 $daily_table = "{$candles_table}__1D";
 
-                if ($ticks_volume > $source->target_volume ) {
-                    $query = "UPDATE $daily_table SET `volume` = GREATEST(`volume`, $ticks_volume) WHERE Date(`ts`) = '$date';";
+                if ($insert_vol > $target_vol  && $target_vol > 0) {
+                    $query = "UPDATE $daily_table SET `volume` = GREATEST(`volume`, $insert_vol) WHERE Date(`ts`) = '$date';";
                     if ($mysqli->try_query($query)) {
                         $diff_pp = 100;
-                        if ($source->target_volume > 0)
-                            $diff_pp = 100 * $ticks_volume / $source->target_volume;
+                        if ($target_vol > 0)
+                            $diff_pp = 100 * $insert_vol / $target_vol;
                         log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s: daily candle %s volume upgraded from %7s to %7s %.1f%% ", 
-                                    $daily_table, $date, format_qty($source->target_volume), format_qty($ticks_volume), $diff_pp);
+                                    $daily_table, $date, format_qty($target_vol), format_qty($insert_vol), $diff_pp);
                     }
                     else
                         log_cmsg("~C31#WARN_FAILED_UPDATE:~C00 %s__1D: daily candle volume still unchanged", $candles_table);
