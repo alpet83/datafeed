@@ -574,7 +574,7 @@
             $part_id = date('Ym01', strtotime($date));
             for ($h = $hour; $h < 24; $h++) {
                 $job->hour = $h + 1; // for next iteration if not finished now
-                
+
                 $t_start = pr_time();                                
                 $hour_start = sprintf("$date %02d:00:00", $h);
                 $hour_end = format_ts( strtotime($hour_start) + 3600 );
@@ -744,14 +744,19 @@
                 $query .= " `high` = VALUES(`high`), `low` = VALUES(`low`), `volume` = VALUES(`volume`)";
                 // $query .= "\n\t`high` = GREATEST(`high`, VALUES(`high`)), `low` = LEAST(`low`, VALUES(`low`)), `volume` = GREATEST(`volume`, VALUES(`volume`))";
                 $res_m = $mysqli->try_query($query);         
+                $qins = $query;
+
                 $tmr->add('insert');
-                $timings = '~C00'.$tmr->dump(0.1, 'format_color').format_color(' total %.1f s', $tmr->elapsed());
+                $elapsed = $tmr->elapsed();
+                $timings = '~C00'.$tmr->dump(0.1, 'format_color').format_color(' total %.1f s', $elapsed);
                 $inserted = count($rows) - $updated;
-                if ($inserted > 0)
+                $show_info = $elapsed >= 0.2 || !$res_m || !$res_c;
+
+                if ($inserted > 0 && $show_info)
                     log_cmsg("~C92#RECOVERY_CANDLES($idx):~C00 %d missed candles inserted, %d updated in %s, volume change %s => %s, for MySQL %s, ClickHouse %s, timings: %s", 
                                 $inserted, $updated, $candles_table, format_qty($prev_vol), format_qty($ticks_volume),
                                  b2s($res_m), b2s($res_c), $timings);
-                else
+                elseif ($show_info) 
                     log_cmsg("~C92#RECOVERY_CANDLES($idx):~C00 %d candles updated in %s, volume change %s => %s (+%.3f%%), for MySQL %s, ClickHouse %s, timings: %s",
                                 $updated, $candles_table, format_qty($prev_vol), format_qty($ticks_volume), $upgrade_pp,
                                 b2s($res_m), b2s($res_c), $timings);            
@@ -761,9 +766,11 @@
                 if ($ticks_volume > $source->target_volume ) {
                     $query = "UPDATE $daily_table SET `volume` = GREATEST(`volume`, $ticks_volume) WHERE Date(`ts`) = '$date';";
                     if ($mysqli->try_query($query)) {
-                        $diff_pp = 100 * $ticks_volume / max(1, $source->target_volume);
-                        log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s: daily candle %s volume upgraded to %s %.1f%% ", 
-                                    $daily_table, $date, format_qty($ticks_volume), $diff_pp);
+                        $diff_pp = 100;
+                        if ($source->target_volume > 0)
+                            $diff_pp = 100 * $ticks_volume / $source->target_volume;
+                        log_cmsg("~C92#RECOVERY_CANDLES:~C00 %s: daily candle %s volume upgraded from %7s to %7s %.1f%% ", 
+                                    $daily_table, $date, format_qty($source->target_volume), format_qty($ticks_volume), $diff_pp);
                     }
                     else
                         log_cmsg("~C31#WARN_FAILED_UPDATE:~C00 %s__1D: daily candle volume still unchanged", $candles_table);
@@ -789,21 +796,24 @@
                 $first_t = array_key_first($c_map);
                 $last_t = array_key_last($c_map);
                 $range = sprintf("`ts` >= '%s' AND `ts` <= '%s'", format_ts($first_t), format_ts($last_t)); 
-                $control = $mysqli->select_map('ts, volume', $candles_table, "WHERE $strict") ?? [];
+                $control = $mysqli->select_map('ts,volume', $candles_table, "WHERE $strict") ?? [];
                 $ctrl_vol = 0;
                 $diffs = [];
-                foreach ($control as $ts => $volume) {
-                    $prev = $check[$ts] ?? 0;
+                foreach ($control as $ts => $real_vol) {
+                    $prev = $exists[$ts] ?? 0;
                     $rec = $c_map[strtotime($ts)] ?? [0, 0, 0, 0, 0];
-                    $upd = $rec[CANDLE_VOLUME] ?? 0; 
-                    $ctrl_vol += $volume;
-                    if (!same_values($volume, $upd))
-                        $diffs[$ts] = format_qty($prev) . '=>'. format_qty($upd). '=>'. format_qty($volume);
+                    $upd = $rec[CANDLE_VOLUME] ?? 0;                                         
+                    $ctrl_vol += $real_vol;
+                    if (!same_values($upd, $real_vol) && !same_values($prev, $real_vol)) {
+                        $info = format_qty($prev) . ' => '. format_qty($upd). ' => '. format_qty($real_vol);                                                
+                        file_add_contents("{$mgr->tmp_dir}/candles_recovery_{$this->ticker}.sm", "$ts: $info\n");
+                        $diffs[$ts] = $info;
+                    }
                 }       
                 
-                $diff_vol = $ctrl_vol - $insert_vol;
-                $diff_pp = 100 * $diff_vol / max($ctrl_vol, $insert_vol);
-                if (abs($diff_pp) > 0.2) {
+                $diff_vol = $insert_vol - $ctrl_vol;
+                $diff_pp = 100 * $diff_vol / max($ctrl_vol, $insert_vol, $ticks_volume, 0.01);
+                if ($diff_pp > 0.01 || count($diffs) > 0) {  //  жаловаться только если объем вставки меньше результата или есть несоответствия
                     log_cmsg("~C31#WARN_SYNC_MISTMATCH:~C00 after checking volume diff %.2f%%, candles %s vs prev %s vs insert %s, produced range %s vs strict %s, diffs: %s", 
                                             $diff_pp, format_qty($ctrl_vol), format_qty($prev_vol), format_qty($insert_vol),
                                             $range, $strict, json_encode($diffs));
@@ -811,7 +821,7 @@
             }
             else    
                 log_cmsg("~C33#RECOVERY_CANDLES:~C00 no candles generated for update %s from %d ticks", $candles_table, $ticks_count);
-            return $updated;
+            return $inserted + $updated;
         }
 
         protected function ReleaseMiniCandles(CandlesCache $mcache, string $date) {

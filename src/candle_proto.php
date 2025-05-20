@@ -16,6 +16,7 @@
 
         protected  $daily_map = [];
 
+        protected  $sync_tasks = []; // tasks for synchronization with ClickHouse
         protected  $sync_map = []; // ClickHouse sync checked
 
         protected  $ch_count_map = []; // ClickHouse table stats 
@@ -68,7 +69,7 @@
 
             if (strlen($this->table_create_code) < 10)
                 throw new Exception("~C91#ERROR:~C00 table {$this->table_name} code not retrieved: ".var_export($this->table_create_code, true));            
-            
+
             if (!str_in($this->table_create_code, 'PRIMARY KEY')) {
                 log_cmsg("~C31#WARN:~C00 table %s has no PRIMARY KEY (lost on import?), trying to add", $this->table_name);
                 $query = "RENAME TABLE $table_name TO {$table_name}__old";
@@ -345,40 +346,8 @@
 
             $this->ch_count_map = $this->LoadClickHouseStats(); // same stats as count_map in ScanIncomplete
             // в таблице расписания могут быть запросы на синхронизацию свечей, после восстановления из тиков
-            $sync_batch = $mysqli_df->select_map('date,target_volume', 'download_schedule', "WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (target_volume > 0) LIMIT 100");            
-            if (count($sync_batch) > 0) {                
-                log_cmsg("~C33 #SYNC_BATCH:~C00 requested candles sync for %d days", count($sync_batch));
-                $db_name = DB_NAME;
-                $parts = $mysqli_df->select_map('PARTITION_NAME, TABLE_ROWS', 'information_schema.partitions', 
-                                                "WHERE TABLE_SCHEMA = '{$db_name}' AND TABLE_NAME = '{$this->table_name}'", MYSQLI_NUM);
-                $dtl = array_keys($sync_batch);
-                $ptl = [];
-                foreach ($dtl as $dt) {
-                    $year = substr($dt, 0, 4);
-                    $part = "p$year"; 
-                    if (!isset($parts[$part])) 
-                        $part = 'parch';                        
-                    $ptl[$part] = max(0, count($ptl) - 1);
-                }
-                $ptl = implode(",", array_flip($ptl));
-                $dtl = implode("','", $dtl);                
-                $params = count($parts) > 0 ? "PARTITION ($ptl) " : '';
-                $params .= " WHERE DATE(ts) in ('$dtl') GROUP BY DATE(ts)";
-                $tmap = $mysqli_df->select_map('DATE(ts), COUNT(*) as count, SUM(volume) as volume', $this->table_name, $params, MYSQLI_OBJECT);
-
-                foreach ($sync_batch as $date => $tv) {
-                    $target = $tmap[$date] ?? false;
-                    if (is_object($target)) {
-                        $this->SyncClickHouse($date, $target);
-                        $mgr->ProcessWS(false);
-                    }
-                    else {
-                        log_cmsg("~C31 #WARN_SKIP_SYNC:~C00 no source data for %s, parts: %s", $date, json_encode($parts));
-                        $mysqli_df->try_query("DELETE FROM download_schedule WHERE date = '$date' AND ticker = '{$this->ticker}' AND kind = 'sync-c'");
-                    }
-                    if (!$mgr->active) break;
-                }            
-            }
+            $this->sync_tasks = $mysqli_df->select_map('date,target_volume', 'download_schedule', 
+                            "WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (target_volume > 0) LIMIT 100");                        
             return $this->BlocksCount();
         }
 
@@ -721,6 +690,47 @@
                             count($this->cache) / 1000.0, 
                             format_ts($ltk), json_encode($last), $this->last_error);
             }
+        }
+
+        public function ProcessTasks(bool $fast = false) {
+            $sync_batch = array_slice($this->sync_tasks, 0, 30);
+            if (0 == count($sync_batch)) return;                
+            $mysqli_df = sqli_df();
+            if (!$fast);
+                log_cmsg("~C33 #SYNC_BATCH:~C00 requested candles sync for %d days", count($sync_batch));
+            $db_name = DB_NAME;
+            $parts = $mysqli_df->select_map('PARTITION_NAME, TABLE_ROWS', 'information_schema.partitions', 
+                                            "WHERE TABLE_SCHEMA = '{$db_name}' AND TABLE_NAME = '{$this->table_name}'", MYSQLI_NUM);
+            $dtl = array_keys($sync_batch);
+            $ptl = [];
+            $mgr = $this->get_manager();
+
+            foreach ($dtl as $dt) {
+                $year = substr($dt, 0, 4);
+                $part = "p$year"; 
+                if (!isset($parts[$part])) 
+                    $part = 'parch';                        
+                $ptl[$part] = max(0, count($ptl) - 1);
+            }
+            $ptl = implode(",", array_flip($ptl));
+            $dtl = implode("','", $dtl);                
+            $params = count($parts) > 0 ? "PARTITION ($ptl) " : '';
+            $params .= " WHERE DATE(ts) in ('$dtl') GROUP BY DATE(ts)";
+            $tmap = $mysqli_df->select_map('DATE(ts), COUNT(*) as count, SUM(volume) as volume', $this->table_name, $params, MYSQLI_OBJECT);
+
+            foreach ($sync_batch as $date => $tv) {
+                $target = $tmap[$date] ?? false;
+                if (is_object($target)) {
+                    $this->SyncClickHouse($date, $target);
+                    $mgr->ProcessWS(false);
+                }
+                else {
+                    log_cmsg("~C31 #WARN_SKIP_SYNC:~C00 no source data for %s, parts: %s", $date, json_encode($parts));
+                    $mysqli_df->try_query("DELETE FROM download_schedule WHERE date = '$date' AND ticker = '{$this->ticker}' AND kind = 'sync-c'");
+                }
+                if (!$mgr->active || $fast) break;
+            }            
+            
         }
 
         /**
