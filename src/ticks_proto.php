@@ -910,6 +910,7 @@
 
             $day_start = time();
             $back = $this->initialized ? 5 : 0;                
+            $hfirst = $this->history_first;
             $day_start = floor($day_start / SECONDS_PER_DAY - $back) * SECONDS_PER_DAY; // полный набор блоков от сегодня и в прошлое. Потом отсев заполненных
     
             // SELECT * FROM  (SELECT  FROM bitmex__candles__gmtusd  WHERE ts >= '2024-01-01' GROUP BY DATE(ts) ORDER BY volume) LIMIT 50;
@@ -921,29 +922,37 @@
             $mgr = $this->get_manager();
             
             $this->scan_year ++;
-            $base = 2012 + date('n');            
-            $years = date('Y') - 2012 + 1;
-            $year = 2012 + ($this->scan_year + $base) % $years;
+            $first_year = date('Y', $hfirst);
+            $first_year = max($first_year, 2012);                       
+            $years = date('Y') - $first_year + 1;            
+            $base = date('n');  // day number 
+            $year = $first_year + ($this->scan_year + $base) % $years;
 
             $month = date('g'); // scan single partition on DB - better efficiency. Full history covered twice per day
             $start = max($start, strtotime(HISTORY_MIN_TS));                                  
-            $start = max($start, $this->history_first);
-            $single = strtotime("$year-$month-01");            
+            $start = max($start, $hfirst);
 
-            if ($this->scan_year > $years) { // ненужно сканировать больше
-                $this->zero_scans ++;                
-                return;     
+
+            $prefix = "$year-$month";                        
+            $mstart_t = strtotime("$year-$month-01 00:00:00");
+
+            if ($this->scan_year >= $years) { // первый крупный цикл пройден 
+                if ($this->loaded_blocks < 2)
+                    $this->zero_scans ++;                
+                $this->scan_year = 0;                
             }
 
             $ts_start = format_ts($start);            
-            log_cmsg("~C96#PERF(ScanIncomplete):~C00 gathering stats for %s, checking period %d-%02d, ts_start = %s", $table_name, $year, $month, $ts_start);
+            log_cmsg("~C96#PERF(ScanIncomplete):~C00 gathering stats for %s, checking period %d-%02d, history first %s, ts_start = %s",
+                        $table_name, $year, $month, format_ts($hfirst), $ts_start);
             $bad_candles = [];
             $sched_rows = [];
 
-RESTART:                
-                            
+RESTART:                                            
             $skips = [0, 0, 0, 0];
-            $period = "( YEAR(ts) = $year ) AND ( MONTH(ts) = $month ) AND ( ts >= '$ts_start' )";
+            $month_start = format_ts($mstart_t);            
+            $next_month_start = format_ts(strtotime('+1 month',  $mstart_t));
+            $period = "(ts >= '$month_start') AND (ts < '$next_month_start') "; // best with index on MariaDB
 
             $control_map = [];
             // control ClickHouse candles by MySQL daily candles
@@ -978,12 +987,26 @@ RESTART:
                 $control_map = $ref_map;
             }
 
-            if (0 == count($control_map) && str_in($mysqli_df->error, 'Unknown codec family code')) {                    
-                $this->table_need_recovery= true;    
-                $this->CorrectTable();
-                goto RESTART;
-            }
             $extremums = $mysqli->select_map('DATE(ts), open, close, high, low, volume, trades', "{$candle_tab}__1D", "WHERE volume > 0 ", MYSQLI_OBJECT);
+
+            if (0 == count($control_map)) {                    
+                if (str_in($mysqli_df->error, 'Unknown codec family code')) {
+                    $this->table_need_recovery= true;    
+                    $this->CorrectTable();
+                    goto RESTART;                    
+                }                
+                foreach ($extremums as $day => $rec) {
+                    if (!str_contains($day, $prefix)) continue;
+                    $rec->min = "$day 00:00:00";
+                    $rec->max = "$day 23:59:00";
+                    $rec->count = 1;
+                    $control_map[$day] = $rec;                    
+                }
+                $added = count($control_map);
+                if ($added > 0)
+                    log_cmsg("~C31 #WARN:~C00 no reference 1m candles found for %s in %s, used %d daily as source", $candle_tab, $period, $added);                
+            }
+            
             ksort($extremums);
 
             // таблица статистики по тикам: начало и конец истории внутри дня, сумма объема           
@@ -1022,14 +1045,12 @@ RESTART:
             }
 
             $unchecked = $control_map;                        
-            $dark_zone = $this->initialized ? $start : strtotime(HISTORY_MIN_TS); 
+            $hour = date('G');
+            $dark_zone = ($hour <= 3 || $this->zero_scans > 0) ? $hfirst : strtotime(HISTORY_MIN_TS); // в первую часть дня разрешается загрузка полной истории... во второй только "актуальный период"
             // стратегия поменялась: теперь загрузка с самого начала, до победного конца. Чтобы в БД все ложилось последовательно и доступ был оптимальный. Так собирать сложные свечи будет быстрее
             ksort($control_map);  
             $first_day = array_key_first($control_map);         
-            $t_start = pr_time();       
-
-            
-                 
+            $t_start = pr_time();     
             
             foreach ($control_map as $day => $cstat) {        
                 $elps = pr_time() - $t_start;            
@@ -1041,8 +1062,7 @@ RESTART:
                 if ($sod_t <= $dark_zone) {                    
                     $skips[0] ++;
                     continue;
-                }
-                
+                }                 
 
                 if (!isset($days_map[$day])) {
                     log_cmsg("~C33 #VOID_BLOCK_DETECTED($this->symbol):~C00 at %s volume = %s", $day, $cstat->volume);                                             

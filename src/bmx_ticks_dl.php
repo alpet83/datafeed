@@ -67,10 +67,9 @@
             $json = $this->api_request($url, $params, SECONDS_PER_DAY); // not ask for 24H
             $data = json_decode($json);
             if (is_array($data) && count($data) > 0) {
-                $rec = $data[0];
-                $min = strtotime(HISTORY_MIN_TS);
+                $rec = $data[0];                
                 $t_first = $this->TimeStampDecode($rec->timestamp, 1); // need seconds
-                return $this->history_first = max($min, $t_first); // ограничение глубины данных в прошлое!!
+                return $this->history_first = $t_first; // ограничение глубины данных в прошлое!!
             }
             return false;    
         }

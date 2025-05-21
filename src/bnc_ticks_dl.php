@@ -62,16 +62,18 @@
             if ($this->history_first > 0)
                 return $this->history_first;
             $params = ['fromId' => 0, 'limit' => 1, 'symbol' => $this->symbol ];
-            $url = "{$this->rest_api_url}aggTrade";
+            $url = "{$this->rest_api_url}aggTrades";
             $json = $this->api_request($url, $params, SECONDS_PER_DAY);  // not ask for 24h
-            $data = json_decode($json);
-            
-            if (is_array($data) && count($data) > 0) {
-                $rec = $data[0];
-                $min = strtotime(HISTORY_MIN_TS); // not need load more
-                $t_first = $rec->T / 1000; // need seconds
-                return $this->history_first = max($min, $t_first); // ограничение глубины данных в прошлое!!
+            $data = json_decode($json);            
+            if (is_array($data) && isset($data[0])) {
+                $rec = $data[0];                
+                $t_first = $rec->T / 1000; // need seconds                
+                // log_cmsg("~C97 #HISTORY_FIRST: ~C00 %s = %s", $this->symbol, color_ts($t_first));
+                return $this->history_first = $t_first; // ограничение глубины данных в прошлое!!
             }
+            else
+                log_cmsg("~C91#ERROR(HistoryFirst):~C00 can't detect history start for %s, API request '%s' returned: %s = %s",
+                            $this->symbol, urldecode($this->last_api_request), gettype($data), $json);
             return false;    
         }
 

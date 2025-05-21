@@ -17,6 +17,9 @@
         public     $daily_candle = null;  // для хранения дневной свечи
         public     $minutes_volume = 0; // for reconstruction need check
         public     $last_aggregated = 0; // last aggregated count from cache source into 1s candles
+        protected  $last_filled_m = 0; // last filled minute
+        
+        protected  $last_dbg = [];
 
         public     array $refilled_vol = [];
         public     array $unfilled_vol = [];
@@ -78,6 +81,7 @@
             if (!isset($cm[$m])) 
                 log_cmsg("~C91#WARN:~C00 CheckFillMinute no candle record for minute %d", $m);                           
 
+            $this->last_filled_m = $m;
             $this->refilled_vol[$m] = ($this->refilled_vol[$m] ?? 0) + $amount; // учитывается заполнение в т.ч. дублирующее
             if ($is_dup) return;            
             $this->unfilled_vol[$m] = ($this->unfilled_vol[$m] ?? 0) - $amount;                         
@@ -135,10 +139,35 @@
         public function IsFullFilled(): bool {            
             if (0 == count($this->unfilled_vol)) return true;
             $sum = 0;
-            foreach ($this->unfilled_vol as $v) 
-                if ($v > 0) $sum += $v;
+            $tgt = 0.00;
+            $min_diff = 1440;             
+            $last_m = $this->last_filled_m;
+            $rest = 0;
+            foreach ($this->unfilled_vol as $m => $v) {                
+                if ($v <= 0) continue;
+                $tgt = $this->candle_map [$m][CANDLE_VOLUME] ?? 0;
+                $rfv = $this->refilled_vol[$m] ?? 0;
+                if ($rfv > $tgt * 1.5) continue;
+                $sum += $v;
+                $rest ++;                
+                $diff = abs($m - $last_m);                
+                $min_diff = min($min_diff, $diff); // если заполнения были в незаполненных участках, min_diff = 0                            
+                if ($rest > 10) return false; // уже ясно, что не заполнено
+                /*
+                if (count($this->unfilled_vol) == 1) {
+                    $msg = format_color("\t\t~C94#DBG_UFV:~C00 %s %s => %s / %s, last_m = %s, min_diff = %d ", $this->key,
+                                            gmdate('H:i:s', $m * 60), format_qty($v), format_qty($tgt), 
+                                            gmdate('H:i:s', $last_m * 60), $min_diff);
+                    if (!in_array($msg, $this->last_dbg)) {
+                        $this->last_dbg []= $msg;
+                        log_cmsg($msg);
+                    }
+                } // */
+            }
+            if ($rest <= 3 && $last_m > 0 && $min_diff > 2)
+                return true;
 
-            return $sum < $this->target_volume * 0.0001;
+            return $sum <= $tgt * 0.001;
         }
 
         public function LeftToDownload(): float {
@@ -219,7 +248,6 @@
             }
 
             $this->unfilled_vol = $full_unfilled;
-
             if ($this->db_need_clean) return; // no optimize, need full refill
             $vol_map = $mysqli_df->select_map("(toHour(ts) * 60 + toMinute(ts)) as minute, SUM(amount) as volume", $table, 
                                                "FINAL WHERE $bounds GROUP BY minute ORDER BY minute");
@@ -342,7 +370,7 @@
             return $stored;
         }
 
-        protected function TestUnfilled($m) {
+        protected function TestUnfilled(int $m) {
             $cm = $this->candle_map[$m] ?? [0, 0, 0, 0, 0];
             $mv = $cm[CANDLE_VOLUME];
             if ($mv > 0) {
@@ -358,29 +386,32 @@
             $newest = floor($newest / MIN_STEP_MS) * MIN_STEP_MS;
             if ($this->LoadedForward($newest, 100))
                 $newest = 0; // not available as repeat
+            $key = -1;
 
             foreach ($this->unfilled_vol as $key => $v)
                 if ($this->TestUnfilled($key)) {
                     $tms = $this->candle_tms($key);
-                    if ($this->LoadedForward ($tms, 100)) {
+                    if ($this->LoadedForward ($tms, MIN_STEP_MS / 2)) {
                         $elps = $newest - $tms;
                         if ($elps > 0 && $elps < 60000 )
-                            return $newest; // intra scan
+                            return $this->prev_after = $newest; // intra scan
                         continue; // предотвращение повторных результатов
                     }                    
                     $back = $tms - 60000;
                     $eom  = $tms + 60000;
                     if ($tms > $newest && $newest > $back && $newest < $eom) 
                         $tms = $newest;
-
                     // if ($tms <= $this->prev_after) $tms = $this->prev_after + 100;  // последний костыль надежды
-
                     if ($tms >= $this->lbound_ms) return $this->prev_after = $tms;                    
                     log_cmsg("~C91#ERROR(UnfilledAfter):~C00 for minute key %d produced timestamp %s ", $key, format_tms($tms));
                     break;
-                }
+                }               
+                    
 
-            return $this->get_lbound_ms();  // full reload suggest
+            log_cmsg("~C31 #WARN(UnfilledAfter):~C00 no unfilled minutes for %s in %d points, last checked %d", $this->key, count($this->unfilled_vol), $key);
+            if ($key >= 0)
+                return $this->candle_tms($key); // repeat attempts
+            return $this->get_lbound_ms();  // nothing to download?
         }
 
         public function UnfilledBefore(): int {         
@@ -392,7 +423,7 @@
                     if ($this->LoadedBackward($tms, 100)) {
                         $elps = $oldest - $tms; 
                         if ($elps > 0 && $elps < 60000)  // минута ещё не просканирована?
-                            return $oldest; // intra scan
+                            return $this->prev_before = $oldest; // intra scan
                         continue; // предотвращение повторных результатов
                     }
                     return $this->prev_before = $tms;

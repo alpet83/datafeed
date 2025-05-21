@@ -1085,8 +1085,10 @@ SKIP_CHECKS:
                     $this->table_info = $info = new stdClass();
                     $info->start_part = $rows[0]['name'];
                     $info->end_part = $rows[count($rows) - 1]['name'];
-                    $info->min_time = $conn->select_value("MIN(ts)", $this->table_name, " PARTITION ({$info->start_part}) LIMIT 1  -- QTI");
-                    $info->max_time = $conn->select_value("MAX(ts)", $this->table_name, " PARTITION ({$info->end_part}) LIMIT 1  -- QTI");                    
+                    $pstart = empty($info->start_part) ? '' : "PARTITION ({$info->start_part})";
+                    $pend   = empty($info->end_part) ? '' : "PARTITION ({$info->end_part})";
+                    $info->min_time = $conn->select_value("MIN(ts)", $this->table_name, " $pstart LIMIT 1  -- QTI");
+                    $info->max_time = $conn->select_value("MAX(ts)", $this->table_name, " $pend LIMIT 1  -- QTI");                    
                     $info->size = 0;
                     foreach ($rows as $row) 
                         $info->size += $row['rows'];                    
@@ -1152,21 +1154,16 @@ SKIP_CHECKS:
             
             $limit_past = strtotime(HISTORY_MIN_TS);
             if (!$this->table_corrected)
-                $this->CorrectTables();
-
-                        
+                $this->CorrectTables();                        
             
-            $start = $this->HistoryFirst(); // method should cache return value in this->history_first                    
-            
-            $start = floor($start); // if float => seconds
-            if (!is_int($start))
-                 $start = EXCHANGE_START_SEC;  // using abstract history start
+            $start = $this->HistoryFirst(); // method should cache return value in this->history_first                                
+            if (!$start || $start < EXCHANGE_START_SEC) 
+                throw new Exception("Invalid history start time for {$this->symbol}: ".json_encode($start));            
 
             if (!$this->initialized) {
                 $this->QueryTimeRange();
                 $start = max($start, $limit_past);
-            }
-            $this->history_first = $start;          
+            }            
             $end = $this->db_first(false, 1); // in seconds!
             if (!is_int($end)) {
                 log_cmsg("~C107~C00 #HISTORY_VOID: ~C00~C40 required full history download for %s", $this->ticker);
@@ -1211,7 +1208,7 @@ SKIP_CHECKS:
             }            
             else {
                 $this->head_loaded = true;               
-                $this->nothing_to_download = ($this->zero_scans > 0) && (0 == $this->total_scheduled);
+                $this->nothing_to_download = ($this->zero_scans > 1) && (0 == $this->total_scheduled);
                 if ($this->loaded_full() && !$this->initialized)
                     log_cmsg("~C97#HISTORY_FULL:~C00 nothing planned for download/recovery");
             }

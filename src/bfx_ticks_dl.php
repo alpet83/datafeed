@@ -61,10 +61,9 @@
                 [3]	PRICE	float	Price at which the trade was executed
             */
             if (is_array($data) && count($data) > 0) {
-                $rec = $data[0];
-                $min = strtotime(HISTORY_MIN_TS); // not need load more
+                $rec = $data[0];                
                 $t_first =$rec[IDX_MTS] / 1000; // need seconds
-                return $this->history_first = max($min, $t_first); // ограничение глубины данных в прошлое!!
+                return $this->history_first = $t_first; // ограничение глубины данных в прошлое!!
             }
             return false;    
         }
