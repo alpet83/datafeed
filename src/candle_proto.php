@@ -608,11 +608,17 @@
                     $miss [$day] = "$tk ? ".strval($block); 
             }   
 
-            if (0 == count($this->blocks_map)) return;
+            if (0 == count($covered)) return;
             $ftk = $cache->firstKey();
             $ltk = $cache->lastKey();
 
             foreach ($covered as $day => $block) {
+                if ($cache->Covers($block->lbound)) 
+                    $block->head_loaded = true;
+
+                if ($cache->Covers($block->rbound)) 
+                    $block->tail_loaded = true;
+
                 if ($block->Covered_by($ftk, $ltk + 59) && $block->IsFullFilled()) {
                     $block->code = BLOCK_CODE::FULL;
                     $block->info = "on_update: covered by cache {$cache->key}";
@@ -621,9 +627,10 @@
                     $block->code = BLOCK_CODE::PARTIAL;                
             }
 
-            $days = array_flip($days);
             $keys = array_keys($this->blocks_map);
             $bc = count($keys);
+            if (0 == $bc) return;
+            $days = array_flip($days);
             $keys = array_slice($keys, 0, 10);
             $info = ', no day matched with '.json_encode($days). " vs $bc:".json_encode($keys);
             if ($block)
@@ -693,12 +700,15 @@
         }
 
         public function ProcessTasks(bool $fast = false) {
+            global $chdb;
+
             $sync_batch = array_slice($this->sync_tasks, 0, 30);
-            if (0 == count($sync_batch)) return;                
+            $batch_size = count($sync_batch);
+            if (0 == $batch_size || !$chdb) return;                
             $mysqli_df = sqli_df();
-            if (!$fast);
-                log_cmsg("~C33 #SYNC_BATCH:~C00 requested candles sync for %d days", count($sync_batch));
             $db_name = DB_NAME;
+
+
             $parts = $mysqli_df->select_map('PARTITION_NAME, TABLE_ROWS', 'information_schema.partitions', 
                                             "WHERE TABLE_SCHEMA = '{$db_name}' AND TABLE_NAME = '{$this->table_name}'", MYSQLI_NUM);
             $dtl = array_keys($sync_batch);
@@ -716,13 +726,19 @@
             $dtl = implode("','", $dtl);                
             $params = count($parts) > 0 ? "PARTITION ($ptl) " : '';
             $params .= " WHERE DATE(ts) in ('$dtl') GROUP BY DATE(ts)";
-            $tmap = $mysqli_df->select_map('DATE(ts), COUNT(*) as count, SUM(volume) as volume', $this->table_name, $params, MYSQLI_OBJECT);
+            $tmap = $mysqli_df->select_map('DATE(ts), COUNT(*) as count, SUM(volume) as volume', $this->table_name, $params, MYSQLI_OBJECT);           
+
+            if (!$fast && $batch_size > 0) {
+                $first = array_key_first($sync_batch);
+                $last = array_key_last($sync_batch);
+                log_cmsg("~C33 #SYNC_BATCH($this->ticker):~C00 requested candles sync for %d days, range %s..%s", count($sync_batch), $first, $last);
+            }
 
             foreach ($sync_batch as $date => $tv) {
                 $target = $tmap[$date] ?? false;
                 if (is_object($target)) {
                     $this->SyncClickHouse($date, $target);
-                    $mgr->ProcessWS(false);
+                    $mgr->ProcessWS(false);                    
                 }
                 else {
                     log_cmsg("~C31 #WARN_SKIP_SYNC:~C00 no source data for %s, parts: %s", $date, json_encode($parts));
@@ -1100,7 +1116,8 @@
             global $chdb, $mysqli_df;            
             $t_start = pr_time();
             $cleanup = "DELETE FROM `download_schedule` WHERE (ticker = '{$this->ticker}') AND (kind = 'sync-c') AND (`date` = '$day')";
-            $mysqli_df->query($cleanup); // only local, not touch replica            
+            $mysqli_df->query($cleanup); // only local, not touch replica   
+            unset($this->sync_tasks[$day]);         
             if (!is_object($chdb) || isset($this->sync_map[$day])) return 0;            
             $this->sync_map[$day] = 1;
             $table_name = $this->table_name;

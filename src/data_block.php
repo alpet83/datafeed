@@ -24,6 +24,9 @@
         protected  array $history_bwd = [];
         protected  array $history_fwd = [];
 
+        public  $head_loaded = false;
+        public  $tail_loaded = false;
+
         public  $prev_after = -1;
         public  $prev_before = -1;
 
@@ -179,7 +182,7 @@
 
         
         public function FillRange(int $start_tms, int $end_tms) {
-            
+
         }
 
         public function Finished() {
@@ -347,6 +350,8 @@
             $this->min_avail = $this->rbound;
             $this->history_fwd = [];
             $this->history_bwd = [];
+            $this->head_loaded = false;
+            $this->tail_loaded = false;
             if ($clean_cache) {
                 foreach ($this->cache_files as $file_name)
                     if (file_exists($file_name))

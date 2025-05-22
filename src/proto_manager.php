@@ -97,7 +97,7 @@
         protected   $ws = false;
 
         protected   $ws_active = false;
-        protected   $ws_imports  = 0;
+        public      $ws_imports  = 0;
 
         protected   $ws_empty_reads = 0;
         protected   $ws_events_cnt = 0;           // simple counter
@@ -163,7 +163,7 @@
         abstract protected function CreateWebsocket();        
         
 
-        protected function SaveActivity() {
+        public function SaveActivity() {
             $elps = time() - $this->alive_t;
             if ($elps < 10) return;
             $this->alive_t = time();
@@ -584,9 +584,11 @@
                 $elps = $now - $last_ping;
                 if ($elps > 30) 
                     try {
+                        $ws->last_ping = time() - 20; // prevent ping DDoS                        
                         if ($uptime < 180 && $elps < 3600)
                             log_cmsg("~C94 #WS_PING_LATE:~C00 previus ping elapsed time %d sec, unreaded %d bytes", $elps, $ws->unreaded());
-                        $ws->ping();                        
+                        $ws->ping();        
+                                         
                         if ($elps >= 60) $wait = true;
                     } catch (Throwable $E) {
                         log_cmsg("~C31 #EXCEPTION:~C00 while trying ping WebSocket: %s", $E->getMessage());                        

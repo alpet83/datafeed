@@ -7,6 +7,8 @@
 
     echo '...';
 
+    const CACHE_FLUSH_AFTER = 60000; // сколько записей удерживать в кэше максимум, до сброса в БД
+
     function shadow_work(int $us) {
         global $active_loader;
         if (is_object($active_loader))
@@ -51,6 +53,8 @@
 
         public     int $db_oldest = 0; // saved in session, not global
         public     int $db_newest = 0; // saved in session, not global
+
+        protected  $expected_data_type = 'array'; // 'array' or 'object' will returned REST API with success response
 
         protected  int $saved_min = 0; // timestamp of first item in DB
         protected  int $saved_max = 0; // timestamp of last item in DB
@@ -662,8 +666,8 @@ SKIP_CHECKS:
                     if (!$mgr->active || $minute >= 58 ) {
                         $this->last_error = "script going to termination";
                         break;
-                    }
-                    
+                    }                    
+
                     $reverse = true;
                     $heavy_data = $last_density >= $this->default_limit;
 
@@ -874,6 +878,7 @@ SKIP_CHECKS:
                         $dups_diff = $block->duplicates - $prev_dups;
                         if (BLOCK_CODE::FULL == $block->code)                             
                             break; // больше нечего тут делать, при обработке кэша все решилось                        
+                        
 
                         $cache_size = count($cache); // integraded with last                    
                         if (count($data) > $cache_size + 10 && $index >= 0) {
@@ -894,8 +899,7 @@ SKIP_CHECKS:
                         $newest_ms = $mini_cache->newest_ms();
                         $block->FillRange ($oldest_ms, $newest_ms); // force remove unfilled                
                         $key_first = $cache->firstKey();
-                        $key_last = $cache->lastKey();                                
-
+                        $key_last = $cache->lastKey();                   
                         if ($block->recovery && 0 == count($block)) {  // по логике запроса таких блоков, хотя-бы одна запись должна быть загружена, иначе в его временном диапазоне вакуум                       
                             $first_keys = array_slice($mini_cache->keys, 0, 5);
                             log_cmsg("\t~C41~C97 #BLOCK_INVALID:~C40 ~C00 recovery request failed, no data covers %s, loaded data range: %s .. %s, first 5 keys imported: %s",
@@ -931,7 +935,6 @@ SKIP_CHECKS:
                         $before_ms = max(EXCHANGE_START, $before_ms);                    
                         $this->oldest_ms = min($this->oldest_ms, $oldest_ms);                        
 
-
                         $cache_oldest = $cache->oldest_ms();
                         $cache_newest = $cache->newest_ms();                                                
 
@@ -945,9 +948,14 @@ SKIP_CHECKS:
                         if (count($block) > 0 && $block->IsEmpty()) 
                             $block->code = BLOCK_CODE::PARTIAL; //     
 
-                        if (0 == $left_volume && BLOCK_CODE::FULL != $block->code && $imp < $this->default_limit && !$block->IsFull()) {
+                        if ($left_volume <= 0 && BLOCK_CODE::FULL != $block->code && $imp < $this->default_limit && !$block->IsFull()) {
                             $block->code = BLOCK_CODE::FULL;
                             $block->info = 'target volume reached';
+                        } 
+
+                        if ($left_volume < $block->target_volume * 0.001 && BLOCK_CODE::FULL != $block->code && $block->head_loaded && $block->tail_loaded) {
+                            $block->code = BLOCK_CODE::FULL;
+                            $block->info = "both sides covered, left vol ~C95".format_qty($left_volume);
                         }
                                             
                         $this->newest_ms = max($this->newest_ms, $newest_ms); // last block update => upgrade latest available tick
@@ -967,10 +975,17 @@ SKIP_CHECKS:
 
                     }   // if mini_cache loaded 
                     elseif (is_array($data) ) {
+                        $left_volume = max(0, $block->LeftToDownload()); 
+                        $left_pp = $block->target_volume > 0 ? 100 * $left_volume / $block->target_volume : 100;
+                        $load_info = $block->head_loaded ? '+head' : '';
+                        $load_info .= $block->tail_loaded ? '+tail' : '';
+
                         if ($block->attempts_bwd > 2 && $block->attempts_fwd > 2) {
                             $block->code = 0 == count($block) ? BLOCK_CODE::VOID : BLOCK_CODE::FULL;
                             $block->info = 'data not received/imported several times';
-                            log_cmsg("\t~C31#VOID_CACHE:~C00 block marked as completed, last_loaded %d, imported %d $data_name", count($data), count($this->cache));
+                            $ctag = $left_volume > 0 ? '~C31' : '~C33';
+                            log_cmsg("\t$ctag#VOID_CACHE:~C00 block marked as completed, last loaded %d, imported %d $data_name, block loaded [%s], left volume %s (%.2f%%)",
+                                        count($data), count($this->cache), $load_info, format_qty($left_volume), $left_pp);
                         }
                         else
                             log_cmsg("\t~C94#VOID_CACHE:~C00 ~C00 block %s, no data imported from %d records, attempts %d, last error: %s",
@@ -980,15 +995,16 @@ SKIP_CHECKS:
                     $block->loops ++;             
                     $cache->loops ++;                                            
                     
+                    if (0 == $block->loops % 100)
+                        $mgr->SaveActivity(); // цикл может быть долгим, а подавать признаки жизни желательно регулярно
+
+
                     // $mgr->ProcessWS(false); // обновления мимо кэша!
                     $prev_after = $after_ms;
                     $prev_before = $before_ms;
 
-
-                    if (count($cache) >= 100000) { // TODO: need config parameter
-                        $this->FlushCache();
-                        // TODO: чтобы не падало из-за нехватки памяти, надо вырезать избыточные строки у block, оставляя по 1 на каждую секунду.
-                    }                     
+                    if (count($cache) > CACHE_FLUSH_AFTER)  
+                        $this->FlushCache();                                                                 
                     
                     $last_ts = '';
                     if ($block->max_avail >= $rtm_min || $index < 0)  {                 
@@ -1019,7 +1035,7 @@ SKIP_CHECKS:
             return intval($added);
         }
 
-        public function LoadData(DataBlock $block, string $url, array $params, string $tss, bool $backward_scan): ?array {
+        public function LoadData(DataBlock $block, string $url, array $params, string $tss, bool $backward_scan): null|array|stdClass {
             $dname = strtoupper($this->data_name);
             $m_cycles = $this->get_manager()->cycles;                                
             $index = $block->index;
@@ -1050,8 +1066,8 @@ SKIP_CHECKS:
                 log_cmsg("~C31 #PERF_WARN:~C00 API request time %.2f, wait %.1f, total %.1f sec, retrieved %d length string", $this->last_api_rqt, $this->last_api_wait, $elps, strlen($res));
             
             $block->last_api_request = $this->last_api_request;
-            $data = json_decode($res, false);            
-            if (false !== strpos($res, 'error') || !is_array($data))  {
+            $data = json_decode($res, false, 5, JSON_NUMERIC_CHECK);            
+            if (false !== strpos($res, 'error') || $this->expected_data_type != gettype($data))  {
                 log_cmsg("~C91#WARN: API request failed with response: %s %s", gettype($data), substr($res, 0, 200)); // typical is ratelimit errro
                 return null;
             }      
@@ -1060,10 +1076,7 @@ SKIP_CHECKS:
                 $block->cache_files []= $this->cache_file_last; // this file can be deleted after whole block is loaded
 
             if (is_array($data) && $backward_scan)
-                $data = array_reverse($data); // API returns data in reverse order, normalizing  
-            elseif (!is_array($data))     
-                log_cmsg("~C91#REQUEST_FAILED:~C00 %s %s", gettype($data), substr($res, 0, 100));
-            
+                $data = array_reverse($data); // API returns data in reverse order, normalizing              
 
             $this->rest_time_last = time();                        
             return $data;

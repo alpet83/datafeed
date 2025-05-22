@@ -141,8 +141,7 @@
                 log_cmsg("~C97#DB_PERF(Flush-$fc):~C00 saved to DB %d / %d records, opt. time = %.1f s", $saved, $cache_size, $t_opt);
             }
             else
-                log_cmsg("~C97#DB_PERF(Flush-$fc):~C00 saved to DB %d / %d records", $saved, $cache_size);
-            
+                log_cmsg("~C97#DB_PERF(Flush-$fc):~C00 saved to DB %d / %d records", $saved, $cache_size);                       
         }
         public function Elapsed(): float {
             return max(0, time_ms() - $this->newest_ms) / 1000;         
@@ -526,7 +525,9 @@
 
         public function ProcessPause(int $us) {                        
             parent::ProcessPause($us);
-            if (0 == $this->shadow_jobs) return;            
+            if (0 == $this->shadow_jobs) return;       
+            if (count($this->cache) > CACHE_FLUSH_AFTER / 2)
+                $this->FlushCache(); // пока одни данные загружаются через API, другие можно записывать
             $t_start = pr_time();
             $this->ProcessAggregate();            
             $this->ProcessTasks(true);           
