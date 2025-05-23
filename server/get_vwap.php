@@ -10,12 +10,15 @@
    else
       require_once "lib/db_config.php";   
       
+   $inj_flt = 'PHP:SQL';
 
-   $pair_id = rqs_param('pair_id', 1);
-   $limit = rqs_param('limit', 10);
-   $ts_from = rqs_param('ts_from', date('Y-m-d H:i:00', time() - 3600));   
-   $exch = rqs_param('exchange', 'any'); 
-   $host = rqs_param('host', 'db-local.lan');
+   $pair_id = rqs_param('pair_id', 1) * 1;
+   $limit = rqs_param('limit', 10) * 1;
+
+   $hour_back = date('Y-m-d H:i:00', time() - 3600); // typically  over hour
+   $ts_from = rqs_param('ts_from', $hour_back, $inj_flt, REGEX_TIMESTAMP_FILTER);   
+   $exch = rqs_param('exchange', 'any', $inj_flt, '/(\w+)/'); 
+   $host = rqs_param('host', 'db-local.lan', $inj_flt, '/(\S+)/');
 
    $exch = strtolower($exch);
 
@@ -26,7 +29,6 @@
    $mysqli = init_remote_db('datafeed'); // default
    if (!$mysqli)
       die("#FATAL: can't connect to database datafeed at $host\n");
-
 
    function format_result(float $avg): string {
       $pp = max(1, 6 - log10($avg)); // ex: 1000-9900 = 3, 10000-99000 = 2
@@ -71,7 +73,7 @@
      return "#OK";    
    }
 
-   $sources = ['binance', 'bitfinex', 'bitmex'];
+   $sources = ['binance', 'bitfinex', 'bitmex', 'bybit']; // remove not used exchanges
    if ('any' != $exch && 'all' != $exch) 
        $sources = [$exch];
 
@@ -79,7 +81,8 @@
    $accum = [];
 
    foreach ($sources as $db_name) {
-      $mysqli->select_db($db_name);      
+      if (!$mysqli->select_db($db_name)) continue;
+
       $vwap = 0;
       $key = "$db_name-candles";
       $err = load_from_candles($pair_id, $ts_from, $limit, $vwap);      
@@ -118,12 +121,11 @@
       }      
       return "#OK";
    }
-
-
    
    $sources = ['binance', 'bitfinex', 'bitmex'];
-   foreach ($sources as $src) {
-      $mysqli->select_db($src);
+
+   foreach ($sources as $src) {      
+      if (!$mysqli->select_db($src)) continue;
       $avg = 0;
       $test = load_from_tickers($pair_id, $ts_from, $limit, $avg);
       if ('#OK' != $test) {

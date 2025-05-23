@@ -154,6 +154,12 @@
                     $rl->SpreadFill();
                 }
             }
+            if ($res === null) {
+                $this->last_error = 'no data';
+                log_cmsg("~C31#ERROR_RESPONSE(API/klines):~C00 no data for %s", $this->symbol);
+                return null;
+            }
+
             if (0 != $res->retCode) {
                 $this->last_error = "{$res->retCode}:$res->retMsg";
                 log_cmsg("~C91#ERROR_RESPONSE(API/klines):~C00 %s, %s", $res->retCode, $res->retMsg);
@@ -192,7 +198,8 @@
                 $candles = new CandlesCache($this); 
                 $candles->interval = $this->current_interval = SECONDS_PER_DAY;
                 $this->table_name = $table_name;
-                while (true) {
+                $attempts = 0;
+                while ($attempts ++ < 5) {  // estimated 5000 days = ~ 13 years max
                     $data = $this->LoadCandles($candles, $ts_from, false, $per_once);
                     if (is_array($data) && count($data) > 0) {
                         $part = $this->ImportCandles($data, 'REST-API-1D', true);
@@ -284,7 +291,7 @@
             }
                    
             $imported = 0;
-            
+
             if ($loader instanceof BybitCandleDownloader) {                
                 $src = $data->data;
                 $rows = [];

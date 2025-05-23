@@ -58,6 +58,7 @@
 
         protected  int $saved_min = 0; // timestamp of first item in DB
         protected  int $saved_max = 0; // timestamp of last item in DB
+
         public     int $first_ts = 0;  // first item timestamp was imported in session
 
         /** @var $newest_ms - last item timestamp was imported in session  */
@@ -1068,6 +1069,7 @@ SKIP_CHECKS:
             $block->last_api_request = $this->last_api_request;
             $data = json_decode($res, false, 5, JSON_NUMERIC_CHECK);            
             if (false !== strpos($res, 'error') || $this->expected_data_type != gettype($data))  {
+                $this->rest_errors ++;
                 log_cmsg("~C91#WARN: API request failed with response: %s %s", gettype($data), substr($res, 0, 200)); // typical is ratelimit errro
                 return null;
             }      
@@ -1235,13 +1237,14 @@ SKIP_CHECKS:
 
         public function RestDownload(): int {
             global $verbose, $rest_allowed_t;
-            if ($this->rest_errors > 100)  return -1;                     
+            if ($this->rest_errors > 10)  return -1;                     
                           
             $this->cycle_break = false;
             $load_history = ($this->data_flags & DL_FLAG_HISTORY) > 0;
             $n_blocks = count($this->blocks);
             $mgr = $this->get_manager();
-            $minute = date('i');            
+            $minute = date('i');                    
+
             if (0 == $n_blocks) {                
                 if (0 == $this->loaded_blocks && 0 == $this->zero_scans && $mgr->cycles < 10 && $load_history)
                     log_cmsg("~C34#REST_DOWNLOAD:~C00 too small blocks to download for %s, scaning...", $this->ticker);                    
@@ -1254,7 +1257,6 @@ SKIP_CHECKS:
             // TODO: non busy update, add web-socket status checking
             $allow_upd = $limiter->Avail() > 25;
             $allow_upd |= $this->Elapsed() > 600;       
-
 
             $uptime = $mgr->Uptime();
             $ws_elps = time() - $this->ws_time_last;

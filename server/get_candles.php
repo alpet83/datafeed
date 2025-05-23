@@ -1,15 +1,15 @@
 <?php
-   include_once 'lib/common.php';
-   include_once 'lib/db_tools.php';
-   if (file_exists("lib/db_config.php"))
-      include_once "lib/db_config.php";
-   else 
-      include_once "bot/lib/db_config.php";
+   set_include_path(get_include_path() . PATH_SEPARATOR . '..'.PATH_SEPARATOR . 'bot');
+   require_once 'lib/common.php';
+   require_once 'lib/db_tools.php';   
+   require_once "lib/db_config.php";        
 
-   $pair_id = rqs_param('pair_id', 1);
-   $limit = rqs_param('limit', 1000);
-   $ts_from = rqs_param('ts_from', date('Y-m-d H:i:00', time() - 60000));
-   $exch = rqs_param('exchange', 'bitfinex'); 
+   $inj_flt = 'PHP:SQL';
+   $pair_id = rqs_param('pair_id', 1) * 1;
+   $limit = rqs_param('limit', 1000) * 1;
+   $before = date('Y-m-d H:i:00', time() - 60000);
+   $ts_from = rqs_param('ts_from', $before, $inj_flt, REGEX_TIMESTAMP_FILTER);
+   $exch = rqs_param('exchange', 'bitfinex', $inj_flt, '/(\w+)/'); 
    $exch = strtolower($exch);
 
    error_reporting(E_ERROR | E_WARNING | E_PARSE);

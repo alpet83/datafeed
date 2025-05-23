@@ -1,10 +1,13 @@
-<?php
-    include_once 'lib/common.php';
-    include_once 'lib/db_tools.php';
-    include_once "bot/lib/db_config.php";
+<?php    
+    set_include_path(get_include_path() . PATH_SEPARATOR . '..');
+    ob_start();
+
+    require_once 'lib/common.php';
+    require_once 'lib/db_tools.php';
+    require_once 'lib/db_config.php';
     require_once 'jpgraph/jpgraph.php';
     require_once 'jpgraph/jpgraph_stock.php';
-
+    ob_clean();
     // indexes
     const BAR_TS = 0;
     const BAR_OPEN = 1;
@@ -15,20 +18,21 @@
     const BAR_CNTR = 6;
 
 
-    $exch = rqs_param('exchange', 'bitfinex');
-    $ticker = rqs_param('ticker', 'btcusd');
-    $period = rqs_param('period', '1'); // in minutes or volume
-    $is_vol = rqs_param('volume', 0);
-    $back   = rqs_param('back', 60 * 24); // in minutes!
-    $width  = rqs_param('w', 1900);
-    $height = rqs_param('h', 800);
+    $inj_flt = 'PHP:SQL';
+    $exch = rqs_param('exchange', 'bitfinex', $inj_flt, '/(\w+)/');
+    $ticker = rqs_param('ticker', 'btcusd', $inj_flt, '/(\w+)/');
+    $period = rqs_param('period', 1) * 1; // in minutes or volume
+    $is_vol = rqs_param('volume', 0) * 1;
+    $back   = rqs_param('back', 60 * 24) * 1; // in minutes!
+    $width  = rqs_param('w', 1900) * 1;
+    $height = rqs_param('h', 800) * 1;
 
     $exch = strtolower($exch);
 
-
-    $from_ts = rqs_param('from', gmdate('Y-m-d H:i', time() - $back * 60));
-    $limit  = rqs_param('limit', 10000);
-    $volume = rqs_param('volume', 0);
+    $from_back = gmdate('Y-m-d H:i', time() - $back * 60);
+    $from_ts = rqs_param('from', $from_back, $inj_flt, REGEX_TIMESTAMP_FILTER);
+    $limit  = rqs_param('limit', 10000) * 1;
+    $volume = rqs_param('volume', 0) * 1;
     $db_time = 0;
 
     class CandleSource implements Countable, ArrayAccess {
@@ -193,15 +197,15 @@
     $vlines = curl_http_request("http://localhost:8090/volume_candles?from=$from_t&treshold=$volume&limit=$limit&print_data=1&exchange=$exch&ticker=$ticker");
     $tload = pr_time() - $tstart;
 
-    if (false !== strpos($vlines, '#ERROR')) {
+    if (str_in($vlines, '#ERROR')) {
         log_msg("#DBG: no data from candle server, result: $vlines");
-        init_db('trading');
+        $mysqli = init_remote_db($exch);
         if (!$mysqli)
             die("#FATAL: DB inaccessible!\n");
 
         $mysqli->try_query("SET time_zone = '+0:00'");
 
-        $table = sprintf('trading.%s__candles__%s', $exch, $ticker);
+        $table = sprintf('%s.candles__%s', $exch, $ticker);
 
 
         $source = new CandleSource();

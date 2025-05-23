@@ -24,19 +24,21 @@
     mysqli_report(MYSQLI_REPORT_ERROR);          
     
     $color_scheme = 'cli';
+    $inj_flt = 'PHP:SQL';
 
-    $exch = rqs_param('exchange', 'bitfinex');
-    $ticker = rqs_param('ticker', 'btcusd');
-    $period = rqs_param('period', '1'); // in minutes or volume
-    $is_vol = rqs_param('volume', 0);
-    $back   = rqs_param('back', 60 * 24); // in minutes!
-    $width  = rqs_param('w', 1900);
-    $height = rqs_param('h', 1000);
+    $exch = rqs_param('exchange', 'bitfinex', $inj_flt, '/(\w+)/');
+    $ticker = rqs_param('ticker', 'btcusd', $inj_flt, '/(\w+)/');
+    $period = rqs_param('period', 1) * 1; // in minutes or volume
+    $is_vol = rqs_param('volume', 0) * 1;
+    $back   = rqs_param('back', 60 * 24) * 1; // in minutes!
+    $width  = rqs_param('w', 1900) * 1;
+    $height = rqs_param('h', 1000) * 1;
 
     $exch = strtolower($exch);
 
-    $from_ts = rqs_param('from', gmdate('Y-m-d H:i:00', time() - $back * 60));
-    $limit  = rqs_param('limit', 10000000);    
+    $hour_back = gmdate('Y-m-d H:i:00', time() - $back * 60);
+    $from_ts = rqs_param('from', $hour_back, $inj_flt, REGEX_TIMESTAMP_FILTER);
+    $limit  = rqs_param('limit', 10000000) * 1000;    
     $db_time = 0;
 
     class TicksSource implements Countable, ArrayAccess {
