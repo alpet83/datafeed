@@ -1,8 +1,9 @@
 #!/usr/bin/php
 <?php
     $last_exception = null;
-    ob_implicit_flush();
-    set_include_path(".:./lib");
+    ob_implicit_flush();    
+    require_once "proto_manager.php";
+
     require_once 'lib/common.php';
     require_once 'lib/esctext.php';
     require_once 'lib/db_tools.php';
@@ -38,8 +39,7 @@
             sleep(30);
         }
     }  
-
-    file_put_contents("$tmp_dir/candle_dl.ts", date(SQL_TIMESTAMP)); 
+    
     error_reporting(E_ERROR | E_WARNING | E_PARSE);
     mysqli_report(MYSQLI_REPORT_ERROR);  
 

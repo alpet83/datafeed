@@ -1255,7 +1255,8 @@ SKIP_SCAN:
     function RunConsoleSession(string $prefix) {
         global $argc, $argv, $tmp_dir, $mysqli, $mysqli_df, $db_servers, $hour, $hstart, $log_file, $manager, $verbose;        
         date_default_timezone_set('UTC');
-        set_time_limit(15);    
+        set_time_limit(15);  
+        check_mkdir($tmp_dir);  
         
         $db_name_active = 'nope'; 
         $symbol = 'all';
@@ -1267,7 +1268,8 @@ SKIP_SCAN:
         }  
         else
             $symbol = rqs_param("symbol", 'all');         
-
+        
+        file_put_contents("$tmp_dir/ticks_dl.ts", date(SQL_TIMESTAMP));     
         $pid_file = sprintf("$tmp_dir/ticks_dl@%s.pid", $symbol);
         $pid_fd = setup_pid_file($pid_file, 300);        
         $hour = date('H');

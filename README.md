@@ -5,7 +5,7 @@
  Apache 2.4+, PHP 8.1+ including CLI and libapache2-mod, php-mysqli, php-mbstring, php-json, php-bzip, php-composer
  MariaDB 10.6+, ClickHouse Server 25.3+
  
- External libraries must placed in same directory or /usr/share/php (means subdirectory vendor with autoload.php must in PHP include path): 
+ External libraries must placed in same directory or /usr/share/php or /usr/local/php (means subdirectory vendor with autoload.php must in PHP include path): 
    *  alpet-libs-php
    *  arthurkushman/php-wss
    *  smi2/phpClickHouse          
@@ -16,5 +16,21 @@
  
  Any questions and feedback please send to project chat https://t.me/svcpool_chat
    
+ # Run in Docker 
+ 1. After downloading and configuring docker, install and configure containers with MariaDB Server, ClicksHouse Server.  
+ 2. Configure user loader in both DB servers, create databases datafeed (better from source cm_tables.sql) and for each used exchange:
+   MariaDB:
+     `CREATE DATABASE IF NOT EXISTS binance DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;` 
+     `GRANT ALL PRIVILEGES ON binance.* TO 'loader'.'%';`
+   ClickHouse:
+     `CREATE DATABASE IF NOT EXISTS binance Engine = Atomic`  
+     `GRANT ALL PRIVILEGES ON binance.* TO 'loader';`
+ 3. Change directory to datafeed after cloning this repository.
+    Run `deploy.sh` for download JPGraph library and edit `db_config.php` - specify password for MariaDB and ClickHouse connectors.
+ 4. Build cointaier: `docker build --network=host -t datafeed .`
+ 5. Run container with binding via screen: `screen -qdmS DFSC ./docker-run.sh`
+ 6. After changing exchange configuration in tables `ticker_map`, `data_config` downloaded can be start interactive: 
+    `docker exec -it dfsc php /datafeed/src/bfx_candles_dl.php`
+    Script will work only hour, so same command can be added into crontab  
  
  

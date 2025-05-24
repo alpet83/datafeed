@@ -7,7 +7,8 @@
 
     ob_implicit_flush();
     set_include_path(".:./lib");
-    $sources = ['lib/common.php',
+    $sources = ['proto_manager.php',
+                'lib/common.php',
                 'lib/esctext.php',
                 'lib/db_tools.php',
                 'lib/db_config.php',
@@ -17,8 +18,7 @@
                 'blocks_loader.php',
                 'candles_cache.php',
                 'ticks_proto.php',                
-                'bnc_websocket.php',
-                'proto_manager.php',
+                'bnc_websocket.php',                
                 'bnc_dm.php',
                 'vendor/autoload.php'];
 
@@ -35,12 +35,11 @@
     $tmp_dir = '/tmp/bnc';
 
 
-    define('REST_ALLOWED_FILE', $tmp_dir.'/rest_allowed.ts');
+    define('REST_ALLOWED_FILE', "$tmp_dir/rest_allowed.ts");
     $log_stdout = true;
     $verbose = 3;
     $rest_allowed_t = time() + 40;    
-
-    file_put_contents("$tmp_dir/ticks_dl.ts", date(SQL_TIMESTAMP));     
+   
     error_reporting(E_ERROR | E_WARNING | E_PARSE);    
     mysqli_report(MYSQLI_REPORT_ERROR);      
     ini_set('display_errors', true);

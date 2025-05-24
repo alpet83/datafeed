@@ -1216,7 +1216,7 @@ RESYNC:
             
         }         
 
-        if (MYSQL_REPLICA && !is_object($replica) || !$replica->ping()) {                
+        if (MYSQL_REPLICA && (!is_object($replica) || !$replica->ping())) {                
             if ($elps > 60) {  // not to frequent                    
                 log_cmsg("~C31 #WARN:~C00 replication DB connection is lost, trying reconnect...");
                 $replica = init_replica_db(DB_NAME);
@@ -1247,7 +1247,8 @@ RESYNC:
         else
             $symbol = rqs_param("symbol", 'all');
     
-       
+        file_put_contents("$tmp_dir/candle_dl.ts", date(SQL_TIMESTAMP));     
+
         $pid_file = sprintf("$tmp_dir/candles_dl@%s.pid", $symbol);
         log_cmsg("~C97#INIT:~C00 trying lock PID file %s...", $pid_file);
         try {

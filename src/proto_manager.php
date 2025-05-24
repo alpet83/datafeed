@@ -1,4 +1,6 @@
 <?php        
+    $SEP = PATH_SEPARATOR;
+    set_include_path(get_include_path()."$SEP..$SEP/lib$SEP/usr/share/php$SEP/usr/local/lib/php");
     require_once 'lib/rate_limiter.php';
 
     const SECONDS_PER_DAY = 24 * 3600;

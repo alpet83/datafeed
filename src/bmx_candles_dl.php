@@ -1,18 +1,17 @@
 #!/usr/bin/php
 <?php
     $last_exception = null;
-    ob_implicit_flush();
-    set_include_path(".:./lib");
+    ob_implicit_flush();    
+    require_once "proto_manager.php";
     require_once 'lib/common.php';
     require_once 'lib/esctext.php';
     require_once 'lib/db_tools.php';
     require_once 'lib/db_config.php';
     require_once 'lib/clickhouse.php';
     require_once 'lib/rate_limiter.php';
-
+    
+    require_once "bmx_websocket.php";    
     require_once "candle_proto.php";
-    require_once "bmx_websocket.php";
-    require_once "proto_manager.php";
     require_once "bmx_dm.php";
     require_once 'vendor/autoload.php';
 

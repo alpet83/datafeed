@@ -17,17 +17,28 @@
                 $config = new ClientConfig();
                 $config->setTimeout(30);               
             } 
-            parent::__construct($api_url, $config);   
-            stream_set_blocking($this->getSocket(), false);
 
-            if (isset($this->socket) && is_resource($this->socket)) {            
-                $result = stream_set_read_buffer($this->socket, 1048576); 
-                log_cmsg("~C93 #WS_CONFIG:~C00 set socket read buffer: %s", 0 == $result ? 'OK': "~C91 $result");            
+            for ($attempt = 0; $attempt < 5; $attempt++) 
+                try {
+                    parent::__construct($api_url, $config);   
+                    break;
+                } 
+                catch (Exception $E) {
+                    log_cmsg("~C91 #WS_CONNECT_FAILED:~C00 %s", $E->getMessage());                
+                    sleep(10);
+                }
+            if (!$this->isConnected()) return;
+            $sock = $this->getSocket();
+            if (is_resource($sock)) {
+                stream_set_blocking($sock, false);
+                $result = stream_set_read_buffer($this->socket, 1048576);
+                log_cmsg("~C93 #WS_CONFIG:~C00 set socket read buffer: %s", 0 == $result ? 'OK': "~C91 $result");
             }
+
         }  
         
-        public function getSocket() {
-            return $this->socket;
+        public function getSocket(): ?resource {
+            return $this->socket ?? null;
         }
 
         public function ping() {
@@ -51,10 +62,11 @@
         abstract public function unsubscibe(array $args); 
 
         public function unreaded() { 
-            if (!is_resource($this->getSocket()))
+            $sock = $this->getSocket();
+            if (!is_resource($sock))
                 return 0; // not connected
             
-            $v = stream_socket_recvfrom($this->getSocket(),  65535, STREAM_PEEK); // This can enough for check unreaded data...
+            $v = stream_socket_recvfrom($sock,  65535, STREAM_PEEK); // This can enough for check unreaded data...
             return is_string($v) ? strlen($v) : 0;                       
         }  
 

@@ -3,7 +3,7 @@
     $last_exception = null;
 
     ob_implicit_flush();
-    set_include_path(".:./lib");
+    require_once "proto_manager.php";    
     require_once 'lib/common.php';
     require_once 'lib/esctext.php';
     require_once 'lib/db_tools.php';
@@ -11,8 +11,7 @@
     require_once 'lib/clickhouse.php';
     require_once 'lib/rate_limiter.php';
     require_once "candle_proto.php";
-    require_once "bfx_websocket.php";
-    require_once "proto_manager.php";
+    require_once "bfx_websocket.php";    
     require_once "bfx_dm.php";
     require_once 'vendor/autoload.php';
 
@@ -20,7 +19,7 @@
     echo "<pre>\n";
     $tmp_dir = '/tmp/bfx';
 
-    define('REST_ALLOWED_FILE', $tmp_dir.'/rest_allowed.ts');
+    define('REST_ALLOWED_FILE', "$tmp_dir/rest_allowed.ts");
     $log_stdout = true;
     $verbose = 3;
     $rest_allowed_t = time();
@@ -35,8 +34,7 @@
             sleep(30);
         }
     }    
-
-    file_put_contents($tmp_dir.'/candle_dl.ts', date(SQL_TIMESTAMP));     
+    
     error_reporting(E_ERROR | E_WARNING | E_PARSE);    
     mysqli_report(MYSQLI_REPORT_ERROR);  
     

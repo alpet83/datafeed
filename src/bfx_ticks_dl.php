@@ -1,9 +1,10 @@
 #!/usr/bin/php
 <?php
     $last_exception = null;
+    ob_implicit_flush();    
+    require_once "proto_manager.php";
 
-    ob_implicit_flush();
-    set_include_path(".:./lib");
+
     require_once 'lib/common.php';
     require_once 'lib/esctext.php';
     require_once 'lib/db_tools.php';
@@ -11,8 +12,7 @@
     require_once 'lib/clickhouse.php';
     require_once 'lib/rate_limiter.php';
     require_once "ticks_proto.php";
-    require_once "bfx_websocket.php";
-    require_once "proto_manager.php";
+    require_once "bfx_websocket.php";    
     require_once "bfx_dm.php";
     require_once 'vendor/autoload.php';
 
@@ -29,8 +29,7 @@
     $log_stdout = true;
     $verbose = 3;
     $rest_allowed_t = time() + 40;    
-
-    file_put_contents("$tmp_dir/ticks_dl.ts", date(SQL_TIMESTAMP));     
+    
     error_reporting(E_ERROR | E_WARNING | E_PARSE);    
     mysqli_report(MYSQLI_REPORT_ERROR);      
     ini_set('display_errors', true);
