@@ -1173,7 +1173,7 @@ SKIP_CHECKS:
             
             $start = $this->HistoryFirst(); // method should cache return value in this->history_first                                
             if (!$start || $start < EXCHANGE_START_SEC) 
-                throw new Exception("Invalid history start time for {$this->symbol}: ".json_encode($start));            
+                throw new Exception("Invalid history start time for {$this->symbol}: ".format_ts($start));            
 
             if (!$this->initialized) {
                 $this->QueryTimeRange();

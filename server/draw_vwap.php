@@ -180,8 +180,8 @@
     ksort($data);
     
 
-    $w_small = 4;
-    $w_big = 16;
+    $w_small = rqs_param('weight_small', 4) * 1;
+    $w_big = rqs_param('weight_big', 20) * 1;
 
     $bv_accum = [];
     $sv_accum = [];

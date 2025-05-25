@@ -37,7 +37,7 @@
 
         }  
         
-        public function getSocket(): ?resource {
+        public function getSocket() {
             return $this->socket ?? null;
         }
 

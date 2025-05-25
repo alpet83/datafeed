@@ -62,6 +62,7 @@
             if (is_array($data) && count($data) > 0) {
                 $rec = $data[0];                
                 $t_first =$rec[IDX_MTS] / 1000; // need seconds
+                log_cmsg("~C97#HISTORY_FIRST:~C00  %s for %s", color_ts($t_first), $this->symbol);
                 return $this->history_first = $t_first; // ограничение глубины данных в прошлое!!
             }
             return false;    

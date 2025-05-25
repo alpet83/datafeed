@@ -1268,11 +1268,11 @@ SKIP_SCAN:
         }  
         else
             $symbol = rqs_param("symbol", 'all');         
-        
+
         file_put_contents("$tmp_dir/ticks_dl.ts", date(SQL_TIMESTAMP));     
         $pid_file = sprintf("$tmp_dir/ticks_dl@%s.pid", $symbol);
         $pid_fd = setup_pid_file($pid_file, 300);        
-        $hour = date('H');
+        $hour = date('H');        
         $log_name = sprintf('/logs/%s_ticks_dl@%s-%d.log', $prefix, $symbol, $hour); // 24 logs rotation
         $log_file = fopen(__DIR__.$log_name, 'w');
         flock($log_file, LOCK_EX);
