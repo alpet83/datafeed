@@ -28,7 +28,7 @@
 
     $exch = rqs_param('exchange', 'bitfinex', $inj_flt, '/(\w+)/');
     $ticker = rqs_param('ticker', 'btcusd', $inj_flt, '/(\w+)/');
-    $period = rqs_param('period', 1) * 1; // in minutes or volume
+    $period = rqs_param('period', 5) * 1; // in minutes or volume
     $is_vol = rqs_param('volume', 0) * 1;
     $back   = rqs_param('back', 60 * 24) * 1; // in minutes!
     $width  = rqs_param('w', 1900) * 1;
@@ -115,6 +115,7 @@
 
             foreach ($data as $tno => $tick) {
                 [$ts, $buy, $price, $amount] = $tick;
+                if (0 == $price) continue;
                 $t = strtotime($ts); // ignore ms
                 $t = floor($t / $period) * $period;
                 $ts = date('Y-m-d H:i', $t);
@@ -175,7 +176,7 @@
 
     $data = &$source->ticks;
 
-    $aggr = new TicksVolumeAggregator(900);        
+    $aggr = new TicksVolumeAggregator($period * 60);        
     $data = $aggr->Process($source);    
     ksort($data);
     
@@ -203,10 +204,20 @@
         return 0;
     }
 
+
+    function last_positive(array $prices, float $default): float { 
+        $idx = count($prices) - 1;
+        while ($idx >= 0) {
+            if ($prices[$idx] > 0) return $prices[$idx];
+            $idx --;
+        }
+        return $default;
+    }
+
     function calc_ema(array &$result, float $coef, float $price) {
-        if (count($result) > 0) {
-            $last = end($result);
-            $ema = $last * (1 - $coef) + $price * $coef;
+        if (count($result) > 0 && $coef > 0 && $coef < 1) {
+            $last = last_positive($result, $price);             
+            $ema = $last * (1 - $coef) + $price * $coef;            
             $result []= $ema;
             return $ema;
         }
