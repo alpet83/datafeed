@@ -14,5 +14,5 @@ docker run --name dfsc --net=host \
         -v ./$JPGRAPH:/var/www/$JPGRAPH \
         -v ./alpet-libs-php:/usr/local/lib/php/lib:ro \
         -v ./src:/datafeed/src \
-        -v ./src:/datafeed/sql \
+        -v ./sql:/datafeed/sql \
         -it -t datafeed $1

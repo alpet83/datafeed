@@ -1,7 +1,8 @@
 <?php        
     
     $cwd = __DIR__;
-    set_include_path(get_include_path().":$cwd:../$cwd:/lib:/usr/share/php:/usr/local/lib/php");
+    $sub = realpath("$cwd/..");
+    set_include_path(get_include_path().":$cwd:$sub:/lib:/usr/share/php:/usr/local/lib/php");
     require_once 'lib/rate_limiter.php';
 
     const SECONDS_PER_DAY = 24 * 3600;
