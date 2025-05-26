@@ -310,7 +310,7 @@ SKIP_DOWNLOAD:
         }
 
         public   function  loaded_full() {                        
-            if (!$this->initialized) return false;
+            if (!$this->initialized || $this->total_scheduled > 0) return false;
             $lb = $this->last_block;
             $elps = time() - $lb->max_avail;
             $data_ok = $elps < $this->normal_delay || $this->ws_sub;           
@@ -743,13 +743,13 @@ SKIP_CHECKS:
                         $block->next_retry = $now + 60; // not to frequiently...                        
                         if ($block->lbound < $dstart && 1 == $this->days_per_block) 
                             log_cmsg("~C91 #ERROR:~C00 last(tail) block have range [%s..%s]", 
-                                        format_ts($block->lbound), format_ts($block->rbound));
-                        // from hour start if initial
+                                        format_ts($block->lbound), format_ts($block->rbound));                        
+                        $prev_tail = $hstart - 60; // near hour start if initial, expected previouis shutdown 
                         $tail = $block->max_avail > $block->lbound ? $block->max_avail : time() - 180;                                        
-                        $tail = max($tail, $hstart);       
-                        $after_ms = min ($after_ms, $hstart * 1000);
-                        if ($block->max_avail <= $hstart && !$block->LoadedForward($after_ms)) {  // means no records in this hour, or initial download                                                               
-                            $from_ts = date_ms('Y-m-d H:00:00', $after_ms);                             
+                        $tail = max($tail, $prev_tail);       
+                        $after_ms = min ($after_ms, $prev_tail * 1000);
+                        if ($block->max_avail <= $prev_tail && !$block->LoadedForward($after_ms)) {  // means no records in this hour, or initial download                                                               
+                            $from_ts = date_ms('Y-m-d H:i:00', $after_ms);                             
                             $after_ms = $this->TimeStampDecode($from_ts, 3); 
                             log_cmsg("~C04~C93#TAIL_DOWNLOAD_FWD({$block->loops}):~C00 right block side after %s, next attempt planned at %s", color_ts($from_ts), color_ts($block->next_retry));
                         }

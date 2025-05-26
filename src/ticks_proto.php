@@ -169,9 +169,16 @@
             /*  Сканирование проблем в таблице с тиками дело достаточно долгое, поэтому каждый запуск скрипта оно не обязательно. 
                 Все потенциально неправильные дни будут добавлены в расписание, из которого при каждом запуске выбирается столько, сколько успеется. 
             */
+            
+            $count = $this->InitScheduled();            
+            if (0 == $count) 
+                $this->ScanIncomplete($start, $end);
+        }
+
+        protected function InitScheduled(): int {
+            $mysqli = sqli();                        
             $mgr = $this->get_manager();
-            $mysqli = sqli();            
-            $mysqli_df = sqli_df();
+
             $strict = "(ticker = '{$this->ticker}') AND (kind = 'ticks') AND (target_volume > 0)";
             $this->total_scheduled = $mysqli->select_value('COUNT(*)', 'download_schedule', "WHERE $strict");                                            
             $schedule = [];
@@ -181,39 +188,38 @@
                 $min_ts = gmdate('Y-m-d', $this->history_first);
                 $mysqli->try_query("DELETE FROM download_schedule WHERE (ticker = '{$this->ticker}') AND (kind = 'ticks') AND (date < '$min_ts')"); // костыль пока не убирать!
                 $schedule = $mysqli->select_map('date, target_volume', 'download_schedule', 
-                                                  "WHERE $strict AND (date >= '$actual_ts') ORDER BY date LIMIT {$this->max_blocks}");
+                                                  "WHERE $strict AND (date >= '$actual_ts') ORDER BY date LIMIT {$this->max_blocks}") ?? [];
             }
 
-            if ($this->total_scheduled > 0 && 0 == count($schedule ?? []))  // scan all scheduled, after actual part loaded
+            if ($this->total_scheduled > 0 && 0 == count($schedule))  // scan all scheduled, after actual part loaded
                 $schedule = $mysqli->select_map('date, target_volume', 'download_schedule', 
-                                             "WHERE $strict ORDER BY date LIMIT {$this->max_blocks}");                                                           
+                                                "WHERE $strict ORDER BY date LIMIT {$this->max_blocks}");                                                           
                     
             
             $count = count($schedule);
-            if (0 == $count)
-                $this->ScanIncomplete($start, $end);
-            else {                   
-                
-                foreach ($schedule as $date => $tv) {                    
-                    $this->DayBlock($date, $tv);                                                                      
-                    $mgr->ProcessWS(false);
-                }
-                krsort($this->blocks_map); // oldest block will download at least
-                if (0 == $this->BlocksCount())
-                    throw new ErrorException(format_color("~C31#ERROR:~C00 no blocks added for %s from %d", $this->ticker, $count));
-
-                $k_first = array_key_first($this->blocks); 
-                $k_last = array_key_last($this->blocks);
-                $last = $this->blocks[$k_first]->key;
-                $first = $this->blocks[$k_last]->key;
-                log_cmsg("~C97#INIT_BLOCKS:~C00 selected from schedule %d / %d blocks, from %s to %s ", 
-                            count($this->blocks), count($schedule), $first, $last);
+            if (0 == $count) {
+                if ($this->total_scheduled > 0)
+                    log_cmsg("~C31 #ERROR_STRANGE:~C00 no blocks found in schedule for %s, total scheduled %d", $this->ticker, $this->total_scheduled);
+                return 0;               
             }
             
+            foreach ($schedule as $date => $tv) {                    
+                $this->DayBlock($date, $tv);                                                                      
+                $mgr->ProcessWS(false);
+            }
 
+            krsort($this->blocks_map); // oldest block will download at least
+            if (0 == $this->BlocksCount())
+                throw new ErrorException(format_color("~C31#ERROR:~C00 no blocks added for %s from %d", $this->ticker, $count));
 
+            $k_first = array_key_first($this->blocks); 
+            $k_last = array_key_last($this->blocks);
+            $last = $this->blocks[$k_first]->key;
+            $first = $this->blocks[$k_last]->key;
+            log_cmsg("~C97#INIT_BLOCKS:~C00 selected from schedule %d / %d blocks, from %s to %s ", 
+                        count($this->blocks), count($schedule), $first, $last);
+            return $this->BlocksCount();            
         }
-
             
 
         abstract public function     ImportTicks(array $data, string $source, bool $is_ws = true): ?TicksCache;
@@ -1273,8 +1279,8 @@ SKIP_SCAN:
         $pid_file = sprintf("$tmp_dir/ticks_dl@%s.pid", $symbol);
         $pid_fd = setup_pid_file($pid_file, 300);        
         $hour = date('H');        
-        $log_name = sprintf('/logs/%s_ticks_dl@%s-%d.log', $prefix, $symbol, $hour); // 24 logs rotation
-        $log_file = fopen(__DIR__.$log_name, 'w');
+        $log_name = sprintf(__DIR__.'/logs/%s_ticks_dl@%s-%d.log', $prefix, $symbol, $hour); // 24 logs rotation
+        $log_file = fopen($log_name, 'w');
         flock($log_file, LOCK_EX);
 
         if (file_exists(REST_ALLOWED_FILE)) {

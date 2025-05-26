@@ -2,7 +2,8 @@
 <?php
     $last_exception = null;
     ob_implicit_flush();    
-    require_once "proto_manager.php";
+    require_once __DIR__.'/proto_manager.php';
+
     require_once 'lib/common.php';
     require_once 'lib/esctext.php';
     require_once 'lib/db_tools.php';
