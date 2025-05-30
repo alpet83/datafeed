@@ -146,7 +146,7 @@
             
             $final = $conn->is_clickhouse() ? 'FINAL' : '';            
             $map = $conn->select_map("DATE(ts) as date, COUNT(*) as count, SUM($vcol) as volume", $table_name, "$final WHERE $strict GROUP BY DATE(ts)", MYSQLI_OBJECT);
-            echo "\t <H2>Ticker: <a href='$url'>$ticker</a></H2>";
+            echo "\t <H2>Ticker: $ticker</H2>";
             echo "\t  <TABLE border=1>\n";
             echo "<TR><th>Date</th><th>Count<th>Volume<th>Target Volume<th>Actions\n";
             $saldo_cnt = 0;
@@ -170,8 +170,8 @@
                     $bgc = 'Green';
                 elseif ($vol >= $tv * 0.995)
                     $bgc = 'LightGreen';                
-                elseif ($tv > 0)
-                    $bgc = 'LightRed';
+                elseif ($tv > 0) 
+                    $bgc = $vol > 0 ? 'LightRed' : 'LightCyan'; // loaded small / not loaded
 
                 if (isset($sched[$date])) {
                     $bgc = '#FFFF80'; 
@@ -315,7 +315,7 @@
                     elseif ($filled > 99)
                         $bgc = '#c0ffc0'; 
                     elseif ($filled <= 99 && $tv > 0) {
-                        $bgc = 'LightCoral'; // less than 90%
+                        $bgc =  $fv > 0 ? 'LightCoral' : 'Cyan';                        
                         $text = sprintf('%.1f%% @ %s', $filled, format_qty($tv));
                     }
                     if ($shv)

@@ -223,7 +223,14 @@
                 return;             
                         
             log_cmsg("~C97 #WS_SUBSCRIBE~C00: already subscribed %d / %d, add = %s", $already, $max, json_encode($args));
-            $this->ws->subscribe( $args);         
+            try {
+                $this->ws->subscribe( $args);         
+            } 
+            catch (Exception $E) {
+                log_cmsg("~C91#WS_EXCEPTION(Subscribe):~C00 %s", $E->getMessage());
+                $this->ws = null;
+            }
+            
             $this->ProcessWS(true);
         }  // function SubscribeWS
 

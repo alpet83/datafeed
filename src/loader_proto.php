@@ -286,7 +286,8 @@
                 log_cmsg("~C31#WARN:~C00 Connection is null, can't process template from %s", $file_name);
                 return false;
             }
-            $qfn = "../sql/$file_name";
+            $sub = realpath(__DIR__.'/..');
+            $qfn = "$sub/sql/$file_name";
             if (file_exists($qfn)) 
                 $file_name = $qfn;
             

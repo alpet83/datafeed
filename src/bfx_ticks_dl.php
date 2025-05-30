@@ -197,19 +197,27 @@
             $keys =  array_keys($this->GetRTMLoaders());
             $already = 0;
             $added = 0;
-            foreach ($keys as $pair_id) {        
-                $downloader = $this->Loader ($pair_id);                                                     
-                if ($downloader->ws_sub) {
-                    $already ++;
-                    continue;
+            $ws =  $this->ws;
+            if ($ws instanceof BitfinexClient)
+                foreach ($keys as $pair_id) {        
+                    $downloader = $this->Loader ($pair_id);                                                     
+                    if ($downloader->ws_sub) {
+                        $already ++;
+                        continue;
+                    }
+                    $params = ['channel' => 'trades', 'symbol' => $downloader->symbol];
+                    log_cmsg("~C97 #WS_SUB~C00: %s = %d", $downloader->symbol, $downloader->data_flags);                                    
+
+                    try {
+                        $ws->subscribe( $params);
+                        $added ++;
+                    }
+                    catch (Exception $E) {
+                        log_cmsg("~C91#WS_EXCEPTION(Subscribe):~C00 %s", $E->getMessage());
+                        $this->ws = null;
+                        break;
+                    }
                 }
-                $params = ['channel' => 'trades', 'symbol' => $downloader->symbol];
-                log_cmsg("~C97 #WS_SUB~C00: %s = %d", $downloader->symbol, $downloader->data_flags);
-                if ($this->ws instanceof BitfinexClient) {
-                    $this->ws->subscribe( $params);
-                    $added ++;
-                }
-            }
             if ($added > 0)
                 log_cmsg("~C97 #WS_SUBSCRIBE:~C00 %d added, already %d confirmed", $added, $already);
         } // function SubscribeWS

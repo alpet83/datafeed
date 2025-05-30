@@ -92,7 +92,13 @@
             
             if (is_object($ws) && $ws instanceof BybitClient && count($list) > 0) {
                 log_cmsg("~C97 #WS_SUBSCRIBE~C00: already subscribed %d / %d, add = %s", $already, count($keys), json_encode($list));
-                $ws->Subscribe ($list);
+                try {
+                    $ws->Subscribe ($list);
+                } 
+                catch (Exception $E) {
+                    log_cmsg("~C91#WS_EXCEPTION(Subscribe):~C00 %s", $E->getMessage());
+                    $this->ws = null;
+                }
             }
         }
 

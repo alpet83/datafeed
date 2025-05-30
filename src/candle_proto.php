@@ -279,9 +279,9 @@
             if (is_array($data) && count($data) > 0) {
                 $list = $this->ImportCandles($data, "WebSocket$context");
                 $info = $this->table_info;
-                if (is_object($list) && is_object($info)) {  // следующий апгрейд позволит не запрашивать данные из БД всякий раз                                      
+                if (is_object($list) && is_object($info) && count($list) > 0) {  // следующий апгрейд позволит не запрашивать данные из БД всякий раз                                      
                     $start  = $list->firstKey();   
-                    if ($start < strtotime($info->min_time))
+                    if ($start > 0 && $start < strtotime($info->min_time))
                         $info->min_time = format_ts($start);
 
                     $end = $list->lastKey();

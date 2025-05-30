@@ -233,20 +233,26 @@
             $already = 0;
             $added = 0;            
             $ws = $this->ws;
-            foreach ($keys as $pair_id) {       
-                $downloader = $this->Loader ($pair_id);                                
-                if ($downloader->ws_sub) {
-                    $already ++;
-                    continue;
-                }                
-                if (is_object($ws) && $ws instanceof BitfinexClient) {
-                    $key = "{$this->ws_data_kind}:{$downloader->symbol}";                     
-                    $params = ['channel' => 'candles','key' => $key];                                    
-                    log_cmsg("~C97 #WS_SUB_ADD~C00: symbol = %s", $downloader->symbol);    
-                    $added ++;
-                    $ws->subscribe($params);
+            if (is_object($ws) && $ws instanceof BitfinexClient)            
+                foreach ($keys as $pair_id) {       
+                    $downloader = $this->Loader ($pair_id);                                
+                    if ($downloader->ws_sub) {
+                        $already ++;
+                        continue;
+                    }                
+                    try {
+                        $key = "{$this->ws_data_kind}:{$downloader->symbol}";                     
+                        $params = ['channel' => 'candles','key' => $key];                                    
+                        log_cmsg("~C97 #WS_SUB_ADD~C00: symbol = %s", $downloader->symbol);    
+                        $added ++;
+                        $ws->subscribe($params);
+                    }
+                    catch (Exception $E) {
+                        log_cmsg("~C91#WS_EXCEPTION(Subscribe):~C00 %s", $E->getMessage());
+                        $this->ws = null;
+                        break;
+                    }
                 }
-            }
             if ($added > 0) 
                 log_cmsg("~C04~C97 #WS_SUB_TOTAL:~C00 %u pairs already subscribed, %u added", $already, $added);
         } // function SubscribeWS        
