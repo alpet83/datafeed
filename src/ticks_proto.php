@@ -964,10 +964,10 @@ RESTART:
             $control_map = [];
             // control ClickHouse candles by MySQL daily candles
             $columns = 'DATE(ts) as date, MIN(ts) as min, MAX(ts) as max, SUM(volume) as volume, COUNT(*) as count';            
-            $control_map = $mysqli->select_map($columns, $candle_tab, "WHERE $period AND volume > 0 GROUP BY DATE(ts) -- control_map", MYSQLI_OBJECT) ?? [];                
+            $control_map = $mysqli->select_map($columns, $candle_tab, "AS T WHERE $period AND T.volume > 0 GROUP BY DATE(ts) -- control_map", MYSQLI_OBJECT) ?? [];                
             // контрольная таблица - минутные свечи, что позволяет определить диапазон времени, в котором есть данные
             if ($mysqli_df->table_exists($candle_tab))  {                                     
-                $ref_map = $mysqli_df->select_map($columns, $candle_tab, "FINAL WHERE $period AND volume > 0 GROUP BY DATE(ts) -- ref_map", MYSQLI_OBJECT) ?? [];                
+                $ref_map = $mysqli_df->select_map($columns, $candle_tab, "AS T FINAL WHERE $period AND T.volume > 0 GROUP BY DATE(ts) -- ref_map", MYSQLI_OBJECT) ?? [];                
                 foreach ($ref_map as $day => $rec)  { 
                     $day_ex = $extremums[$day] ?? null;
                     if (isset($control_map[$day])) {
