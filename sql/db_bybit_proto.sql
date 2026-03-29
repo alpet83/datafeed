@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS `data_config` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE IF NOT EXISTS `ticker_map` (
-  `id` int(11) NOT NULL,
+  `id` int(11) NOT NULL AUTO_INCREMENT,
   `ticker` varchar(16) NOT NULL,
   `symbol` varchar(24) NOT NULL,
   `pair_id` int(11) DEFAULT NULL,
