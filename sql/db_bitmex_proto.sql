@@ -41,38 +41,16 @@ CREATE TABLE `data_config` (
 --
 
 INSERT INTO `data_config` (`id_ticker`, `load_candles`, `load_depth`, `load_ticks`) VALUES
-(1, 1, 0, 0),
+(1, 1, 0, 3),
 (2, 1, 0, 0),
-(3, 1, 0, 0),
-(4, 1, 0, 0),
 (5, 1, 0, 0),
-(6, 1, 0, 0),
 (7, 1, 0, 0),
 (8, 1, 0, 0),
-(9, 1, 0, 0),
-(11, 0, 0, 0),
 (12, 1, 0, 3),
-(13, 1, 0, 0),
-(14, 1, 0, 0),
-(15, 1, 0, 0),
-(16, 1, 0, 3),
+(16, 1, 0, 0),
 (17, 1, 0, 0),
-(18, 1, 0, 3),
-(19, 1, 0, 0),
-(20, 1, 0, 0),
-(21, 1, 0, 0),
-(22, 1, 0, 0),
 (23, 1, 0, 0),
-(24, 1, 0, 0),
-(25, 1, 0, 0),
-(26, 1, 0, 0),
-(27, 0, 0, 0),
-(28, 1, 0, 0),
-(29, 1, 0, 0),
-(30, 1, 0, 0),
-(31, 1, 0, 0),
-(32, 1, 0, 0),
-(33, 3, 0, 0);
+(31, 1, 0, 3);
 
 -- --------------------------------------------------------
 
@@ -94,37 +72,14 @@ CREATE TABLE `ticker_map` (
 INSERT INTO `ticker_map` (`id`, `ticker`, `symbol`, `pair_id`) VALUES
 (1, 'aaveusd', 'AAVEUSD', 5),
 (2, 'adausd', 'ADAUSD', 40),
-(3, 'aptusd', 'APTUSD', 8),
-(4, 'arbusd', 'ARBUSD', 18),
 (5, 'avaxusd', 'AVAXUSD', 17),
-(6, 'axsusd', 'AXSUSD', 48),
 (7, 'bchusd', 'BCHUSD', 9),
 (8, 'dogeusd', 'DOGEUSD', 50),
-(9, 'dotusd', 'DOTUSD', 51),
-(10, 'eosusd', 'EOSUSD', 14),
-(11, 'ethh25', 'ETHH25', 112),
 (12, 'ethusd', 'ETHUSD', 3),
-(13, 'filusd', 'FILUSD', 16),
-(14, 'gmtusd', 'GMTUSD', 11),
-(15, 'ldousd', 'LDOUSD', 42),
 (16, 'linkusd', 'LINKUSD', 19),
 (17, 'ltcusd', 'LTCUSD', 4),
-(18, 'nearusd', 'NEARUSD', 25),
-(19, 'opusd', 'OPUSD', 21),
-(20, 'ordiusd', 'ORDIUSD', 47),
-(21, 'pepeusd', 'PEPEUSD', 76),
-(22, 'shibusd', 'SHIBUSD', 55),
 (23, 'solusd', 'SOLUSD', 54),
-(24, 'suiusd', 'SUIUSD', 24),
-(25, 'tonusd', 'TONUSD', 29),
-(26, 'wldusd', 'WLDUSD', 49),
-(27, 'btch25', 'XBTH25', 101),
-(28, 'btcm25', 'XBTM25', 102),
-(29, 'btcu25', 'XBTU25', 103),
-(30, 'btcusd', 'XBTUSD', 1),
-(31, 'xrpusd', 'XRPUSD', 22),
-(32, 'btceur', 'XBTEUR', 91),
-(33, 'dydxusd', 'DYDXUSD', 66);
+(31, 'xrpusd', 'XRPUSD', 22);
 
 --
 -- Индексы сохранённых таблиц
