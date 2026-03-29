@@ -3,7 +3,8 @@
     require_once 'bnc_websocket.php';
 
     const DB_NAME = 'binance';
-    const HISTORY_MIN_TS = '2023-01-01 00:00:00'; // minimal history start for initial download
+    if (!defined('HISTORY_MIN_TS'))
+        define('HISTORY_MIN_TS', datafeed_history_min_ts('2023-01-01 00:00:00', DB_NAME)); // minimal history start for initial download
     define('EXCHANGE_START', strtotime_ms('2017-07-14 00:00')); 
     define('EXCHANGE_START_SEC', floor(EXCHANGE_START / 1000));
 

@@ -8,6 +8,53 @@
     const SECONDS_PER_DAY = 24 * 3600;
     const WORKING_PERIOD = 3570; // 60 * 59 + 30 seconds
 
+    function datafeed_env_first(array $keys): ?string {
+        foreach ($keys as $key) {
+            $raw = getenv($key);
+            if (false !== $raw) {
+                $value = trim(strval($raw));
+                if (strlen($value) > 0)
+                    return $value;
+            }
+        }
+        return null;
+    }
+
+    function datafeed_history_limit_ts(string $exchange = ''): int {
+        $suffix = strlen($exchange) > 0 ? '_'.strtoupper($exchange) : '';
+        $limit_ts = 0;
+
+        $days = datafeed_env_first(["DATAFEED_HISTORY_LIMIT_DAYS$suffix", 'DATAFEED_HISTORY_LIMIT_DAYS']);
+        if (null !== $days) {
+            $days_n = intval($days);
+            if ($days_n > 0) {
+                $limit_ts = time() - $days_n * SECONDS_PER_DAY;
+                $limit_ts = intdiv($limit_ts, SECONDS_PER_DAY) * SECONDS_PER_DAY;
+            }
+        }
+
+        $ts_raw = datafeed_env_first(["DATAFEED_HISTORY_MIN_TS$suffix", 'DATAFEED_HISTORY_MIN_TS']);
+        if (null !== $ts_raw) {
+            $parsed = strtotime($ts_raw);
+            if (is_numeric($parsed) && $parsed > 0)
+                $limit_ts = max($limit_ts, intval($parsed));
+        }
+
+        return $limit_ts;
+    }
+
+    function datafeed_history_min_ts(string $default_ts, string $exchange = ''): string {
+        $base = strtotime($default_ts);
+        if (!is_numeric($base) || $base <= 0)
+            throw new Exception("Invalid HISTORY_MIN_TS default '$default_ts'");
+
+        $limit_ts = datafeed_history_limit_ts($exchange);
+        if ($limit_ts > 0)
+            $base = max(intval($base), $limit_ts);
+
+        return gmdate('Y-m-d H:i:s', intval($base));
+    }
+
     function time_us(): int {
         return floor(microtime(true) * 1000000); // us
     }

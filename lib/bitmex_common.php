@@ -1,7 +1,11 @@
 <?php
     const DB_NAME = 'bitmex'; // same as exchange
 
-    const HISTORY_MIN_TS = '2023-10-01 00:00:00'; // первый месяц, когда уже номера сделок имеют сортируемую последовательность 
+    $history_min_default = '2023-10-01 00:00:00';
+    if (!defined('HISTORY_MIN_TS')) {
+        $history_min = function_exists('datafeed_history_min_ts') ? datafeed_history_min_ts($history_min_default, DB_NAME) : $history_min_default;
+        define('HISTORY_MIN_TS', $history_min); // первый месяц, когда уже номера сделок имеют сортируемую последовательность
+    }
 
     define('EXCHANGE_START', strtotime_ms('2014-01-01 00:00')); // указывать лучше день начала работы биржи, до минут
     define('EXCHANGE_START_SEC', floor(EXCHANGE_START / 1000));

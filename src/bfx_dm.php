@@ -2,7 +2,8 @@
     require_once "proto_manager.php";
 
     const DB_NAME = 'bitfinex';
-    const HISTORY_MIN_TS = '2015-01-01 00:00:00'; // minimal history start for initial download
+    if (!defined('HISTORY_MIN_TS'))
+        define('HISTORY_MIN_TS', datafeed_history_min_ts('2015-01-01 00:00:00', DB_NAME)); // minimal history start for initial download
 
     define('EXCHANGE_START', strtotime_ms('2013-01-14 00:00:00Z')); // указывать лучше день начала работы биржи, до минут
     define('EXCHANGE_START_SEC', floor(EXCHANGE_START / 1000));
