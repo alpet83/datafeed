@@ -41,16 +41,8 @@ CREATE TABLE `data_config` (
 --
 
 INSERT INTO `data_config` (`id_ticker`, `load_candles`, `load_depth`, `load_ticks`) VALUES
-(1, 1, 0, 3),
-(2, 1, 0, 0),
-(5, 1, 0, 0),
-(7, 1, 0, 0),
-(8, 1, 0, 0),
-(12, 1, 0, 3),
-(16, 1, 0, 0),
-(17, 1, 0, 0),
-(23, 1, 0, 0),
-(31, 1, 0, 3);
+(12, 1, 0, 0),
+(30, 1, 0, 0);
 
 -- --------------------------------------------------------
 
@@ -79,6 +71,7 @@ INSERT INTO `ticker_map` (`id`, `ticker`, `symbol`, `pair_id`) VALUES
 (16, 'linkusd', 'LINKUSD', 19),
 (17, 'ltcusd', 'LTCUSD', 4),
 (23, 'solusd', 'SOLUSD', 54),
+(30, 'btcusd', 'XBTUSD', 1),
 (31, 'xrpusd', 'XRPUSD', 22);
 
 --

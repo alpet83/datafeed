@@ -122,6 +122,7 @@
         }
         
         echo "'\t<H1>Datafeed Report</H1>";
+        printf("<div><a href='data_configurator.php?exchange=%s'>Open data_config web configurator</a></div>\n", $exch);
         $conn = 'ticks' == $data || $force_ch ? $mysqli_df : $mysqli;  
         $vcol = 'ticks' == $data ? 'amount' : 'volume';                    
 

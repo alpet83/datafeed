@@ -23,19 +23,15 @@ CREATE TABLE IF NOT EXISTS `ticker_map` (
 
 INSERT INTO `ticker_map` (`id`, `ticker`, `symbol`, `pair_id`) VALUES
 (1, 'btcusdt', 'BTCUSDT', 1),
-(2, 'ethusdt', 'ETHUSDT', 3),
-(3, 'xrpusdt', 'XRPUSDT', 22),
-(4, 'solusdt', 'SOLUSDT', 54)
+(2, 'ethusdt', 'ETHUSDT', 3)
 ON DUPLICATE KEY UPDATE
   `ticker` = VALUES(`ticker`),
   `symbol` = VALUES(`symbol`),
   `pair_id` = VALUES(`pair_id`);
 
 INSERT INTO `data_config` (`id_ticker`, `load_candles`, `load_depth`, `load_ticks`) VALUES
-(1, 1, 0, 3),
-(2, 1, 0, 3),
-(3, 1, 0, 3),
-(4, 1, 0, 3)
+(1, 1, 0, 0),
+(2, 1, 0, 0)
 ON DUPLICATE KEY UPDATE
   `load_candles` = VALUES(`load_candles`),
   `load_depth` = VALUES(`load_depth`),

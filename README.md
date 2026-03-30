@@ -32,5 +32,16 @@
  6. After changing exchange configuration in tables `ticker_map`, `data_config` downloaded can be start interactive: 
     `docker exec -it dfsc php /datafeed/src/bfx_candles_dl.php`
     Script will work only hour, so same command can be added into crontab  
+
+## Web Configurator
+
+- Use [server/data_configurator.php](server/data_configurator.php) to edit `data_config` in browser.
+- Supported exchanges: `binance`, `bybit`, `bitfinex`, `bitmex`.
+- Preset `Apply Minimal Preset` enforces conservative defaults:
+  - enable `load_candles=1` only for pair_id `1` (BTC) and `3` (ETH)
+  - keep `load_ticks=0` for all rows
+  - keep `load_depth=0` by default
+
+This default profile reduces unnecessary market-data load for most trading setups.
  
  
