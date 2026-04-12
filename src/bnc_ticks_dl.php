@@ -238,7 +238,7 @@
             }
             
             $minute = date('i');
-            if (7 == $minute % 10 && CLICKHOUSE_REPLICA) {
+            if (7 == $minute % 10 && defined('CLICKHOUSE_REPLICA') && CLICKHOUSE_REPLICA) {
                 if (!is_object($mysqli_df->replica) || !$mysqli_df->replica->ping()) {
                     $mysqli_df->replica = ClickHouseConnectMySQL(CLICKHOUSE_REPLICA.':9004', null, null, DB_NAME);                    
                 }

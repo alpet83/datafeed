@@ -407,7 +407,7 @@ SKIP_DOWNLOAD:
                 
                 if (23 == $hour) {                    
                     $param = '';
-                    $meta = this->table_info;
+                    $meta = $this->table_info;
                     if (is_object($meta) && isset($meta->end_part)) 
                         $param .= " PARTITION '{$meta->end_part}'"; // in practice it's took too much time for 1B+ rows without PARTITION clause
                     $param .= $table_code && str_in($table_code, $valid_engine) ? 'FINAL' : '';                     

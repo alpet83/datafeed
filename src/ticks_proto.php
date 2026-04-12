@@ -1301,13 +1301,23 @@ SKIP_SCAN:
         if (MYSQL_REPLICA)
             $mysqli->replica = init_replica_db(DB_NAME, [MYSQL_REPLICA]);
 
+        if (!clickhouse_config_available()) {
+            log_cmsg("~C31 #WARN:~C00 CLICKHOUSE_HOST is not configured; skipping ticks loader run");
+            fclose($log_file);
+            flock($pid_fd, LOCK_UN);
+            fclose($pid_fd);
+            $log_file = false;
+            unlink($pid_file);
+            return;
+        }
+
         $mysqli_df = ClickHouseConnectMySQL(null, null, null, DB_NAME);  
         if ($mysqli_df)
             log_cmsg("~C93 #START:~C00 MySQL interface connected to~C92 %s@$db_name_active~C00 ", $db_servers[0] ); 
         else
             error_exit("~C91#FATAL:~C00 cannot connect to ClickHouse DB via MySQL interface! ");
 
-        if (CLICKHOUSE_REPLICA) { // if const are defined not as null/false            
+        if (defined('CLICKHOUSE_REPLICA') && CLICKHOUSE_REPLICA) { // if const are defined not as null/false
             $mysqli_df->replica = ClickHouseConnectMySQL(CLICKHOUSE_REPLICA.':9004', null, null, DB_NAME);
             if (is_object($mysqli_df->replica)) 
                 log_cmsg("~C103~C30 #WARN_REPLICATION:~C00 %s connected", $mysqli_df->replica->host_info);        

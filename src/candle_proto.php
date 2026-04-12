@@ -26,6 +26,7 @@
         protected  $total_target_vol = 0;                
                         
         private    int $lazy_rcv = 0;        
+        private    bool $daily_table_verified = false;
         
 
         public   function __construct(DownloadManager $mngr, stdClass $ti) {
@@ -71,13 +72,21 @@
                 throw new Exception("~C91#ERROR:~C00 table {$this->table_name} code not retrieved: ".var_export($this->table_create_code, true));            
 
             if (!str_in($this->table_create_code, 'PRIMARY KEY')) {
-                log_cmsg("~C31#WARN:~C00 table %s has no PRIMARY KEY (lost on import?), trying to add", $this->table_name);
-                $query = "RENAME TABLE $table_name TO {$table_name}__old";
-                $copy = "INSERT IGNORE INTO $table_name SELECT * FROM {$table_name}__old";
-                if ($mysqli->query($query) &&
-                    $this->CreateTables() && $mysqli->query($copy)) {
-                    log_cmsg("~C92#TABLE_UPGRADE:~C00 table %s recreated, copied %d rows", $this->table_name, $mysqli->affected_rows);
-                    $mysqli->query("DROP TABLE {$table_name}__old");
+                $skip_raw = getenv('DATAFEED_SKIP_RENAME_CORRECTION');
+                $skip_val = false !== $skip_raw ? strtolower(trim(strval($skip_raw))) : '1';
+                $skip_rename_rebuild = in_array($skip_val, ['1', 'true', 'yes', 'on'], true);
+
+                if ($skip_rename_rebuild) {
+                    log_cmsg("~C31#WARN:~C00 table %s has no PRIMARY KEY; rename-based correction skipped (DATAFEED_SKIP_RENAME_CORRECTION=%s)", $this->table_name, $skip_val);
+                } else {
+                    log_cmsg("~C31#WARN:~C00 table %s has no PRIMARY KEY (lost on import?), trying to add", $this->table_name);
+                    $query = "RENAME TABLE $table_name TO {$table_name}__old";
+                    $copy = "INSERT IGNORE INTO $table_name SELECT * FROM {$table_name}__old";
+                    if ($mysqli->query($query) &&
+                        $this->CreateTables() && $mysqli->query($copy)) {
+                        log_cmsg("~C92#TABLE_UPGRADE:~C00 table %s recreated, copied %d rows", $this->table_name, $mysqli->affected_rows);
+                        $mysqli->query("DROP TABLE {$table_name}__old");
+                    }
                 }
             }
 
@@ -107,11 +116,15 @@
             }
 
             $daily_table = "{$table_name}__1D";
-            $code = $mysqli->show_create_table($daily_table);
             $q_trades = "ALTER TABLE $daily_table ADD COLUMN IF NOT EXISTS `trades` INT UNSIGNED DEFAULT '0' AFTER `volume`";
-            if (!str_in($code, 'trades'))                 
-                $mysqli->try_query($q_trades); // add trades column
-            
+            if ($mysqli->table_exists($daily_table)) {
+                $code = $mysqli->show_create_table($daily_table);
+                if (!str_in($code, 'trades'))
+                    $mysqli->try_query($q_trades); // add trades column
+            } else {
+                log_cmsg("~C91#WARN:~C00 daily table %s not exists during correction", $daily_table);
+            }
+
             if ($chdb) $chdb->write($q_trades);
 
             $sh_table = 'download_schedule';
@@ -139,7 +152,6 @@
             $template = 'mysql_stats_table.sql';            
             $mysqli_df = sqli_df();
             $this->table_name = "candles__{$this->ticker}";
-            $daily_table = "{$this->table_name}__1D";                
 
             if ($mysqli_df->table_exists($this->stats_table)) {
                 $code = $mysqli_df->show_create_table($this->stats_table);
@@ -150,28 +162,60 @@
                 $this->CreateTable($mysqli_df, $template, $this->stats_table); 
 
             $res = parent::CreateTables();
-            
-            $exists = $mysqli_df->table_exists($daily_table);
-            $query = "CREATE TABLE IF NOT EXISTS $daily_table LIKE {$this->table_name}";
-            $res &= $mysqli_df->try_query($query); // void create                    
+            $res &= $this->EnsureDailyTable(true);
+            return $res;
+        }
 
-            if (is_object($chdb)) {                 
-                // $this->table_proto_ch = str_replace('mysql', 'clickhouse', $this->table_proto);
-                $res &= $this->CreateTable($chdb, $this->table_proto_ch, $daily_table);
+        protected function EnsureDailyTable(bool $allow_repair = true): bool {
+            global $chdb;
+            $mysqli_df = sqli_df();
+            $daily_table = "{$this->table_name}__1D";
+
+            if (!$mysqli_df->table_exists($this->table_name)) {
+                if (!$allow_repair) {
+                    log_cmsg("~C31#WARN:~C00 base table %s is missing while checking %s", $this->table_name, $daily_table);
+                    return false;
+                }
+                log_cmsg("~C31#WARN:~C00 base table %s is missing, trying to create before ensuring %s", $this->table_name, $daily_table);
+                parent::CreateTables();
+                if (!$mysqli_df->table_exists($this->table_name)) {
+                    log_cmsg("~C91#ERROR:~C00 failed to create base table %s while checking %s", $this->table_name, $daily_table);
+                    return false;
+                }
             }
-            
-            if (!$exists) {                         
+
+            $daily_exists = $mysqli_df->table_exists($daily_table);
+            if (!$daily_exists)
+                log_cmsg("~C31#WARN:~C00 daily table %s is missing, recreating now", $daily_table);
+
+            $query = "CREATE TABLE IF NOT EXISTS $daily_table LIKE {$this->table_name}";
+            $ok = $mysqli_df->try_query($query);
+
+            if ($ok && !$daily_exists) {
                 $code = $mysqli_df->show_create_table($this->table_name);
                 if (str_in($code, 'PARTITION BY'))
                     $mysqli_df->query("ALTER TABLE {$this->table_name} REMOVE PARTITIONING");
-                $query = "ALTER TABLE $daily_table DROP IF EXISTS `flags`";
-                $mysqli_df->try_query($query); // not need flags column                       
+            }
+
+            if ($ok)
+                $mysqli_df->try_query("ALTER TABLE $daily_table DROP IF EXISTS `flags`");
+            if ($ok)
+                $mysqli_df->try_query("ALTER TABLE $daily_table ADD COLUMN IF NOT EXISTS `trades` INT UNSIGNED DEFAULT '0' AFTER `volume`");
+
+            if (is_object($chdb)) {
+                $this->CreateTable($chdb, $this->table_proto_ch, $daily_table);
                 try {
-                    if ($chdb) $chdb->write($query); 
+                    $chdb->write("ALTER TABLE $daily_table DROP COLUMN IF EXISTS flags");
+                    $chdb->write("ALTER TABLE $daily_table ADD COLUMN IF NOT EXISTS trades UInt32 DEFAULT 0 AFTER volume");
                 } catch (Throwable $e) {
                 }
             }
-            return $res;
+
+            if (!$ok || !$mysqli_df->table_exists($daily_table)) {
+                log_cmsg("~C91#ERROR:~C00 failed to ensure daily table %s", $daily_table);
+                return false;
+            }
+            return true;
         }
   
         public function FlushCache(bool $rest = true) {
@@ -294,6 +338,11 @@
         }
         protected function InitBlocks(int $start, int $end) {            
 
+            if (!$this->daily_table_verified) {
+                $this->daily_table_verified = true;
+                $this->EnsureDailyTable(true);
+            }
+
             if ($this->data_flags & DL_FLAG_HISTORY == 0 || $this->zero_scans > 0) 
                 return;
 
@@ -399,14 +448,23 @@
             global $mysqli_df, $chdb;
             $table_name = "{$this->table_name}__1D";
             
-            if ($from_DB) {                                
+            if ($from_DB) {
                 log_cmsg("~C93#DAILY_CACHE:~C00 trying load from %s", $table_name);
+
+                if (!$this->EnsureDailyTable(true)) {
+                    log_cmsg("~C91#WARN:~C00 daily table %s is still unavailable after recreate attempt", $table_name);
+                    return [];
+                }
+
                 $params = $mysqli_df->is_clickhouse() ? 'FINAL' : '';
                 $map = $mysqli_df->select_map('UNIX_TIMESTAMP(ts),open,close,high,low,volume,trades', $table_name, $params, MYSQLI_NUM);
+                if (!is_array($map))
+                    $map = [];
+
                 if (0 == count($map))
-                   log_cmsg("~C91#WARN:~C00 no data in %s", $table_name);                    
+                    log_cmsg("~C91#WARN:~C00 no data in %s", $table_name);
                 else
-                   ksort($map);
+                    ksort($map);
                 $invalid = 0;
                 foreach ($map as $key => $rec) {
                     [$open, $close, $high, $low, $volume, $trades] = $rec;
@@ -1280,8 +1338,9 @@ RESYNC:
         $chdb = null;
         $pid = shell_exec('pidof clickhouse-server');
         $pid = trim($pid);
-        if (strlen($pid) > 1 && is_integer($pid) || !str_in(CLICKHOUSE_HOST, '127.0.0.1')) {
-            $chdb = ClickHouseConnect(CLICKHOUSE_USER, CLICKHOUSE_PASS, DB_NAME);         
+        $ch_host = clickhouse_cfg('CLICKHOUSE_HOST', 'CLICKHOUSE_HOST', '127.0.0.1');
+        if ((strlen($pid) > 1 && is_numeric($pid)) || !str_in($ch_host, '127.0.0.1')) {
+            $chdb = ClickHouseConnect(null, null, DB_NAME);
         }
     
         $mysqli->try_query("SET time_zone = '+0:00'");

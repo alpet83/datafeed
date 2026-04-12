@@ -36,11 +36,11 @@ $last_heartbeat = 0;
 
 $known_loaders = [
     ['key' => 'binance_candles', 'exchange' => 'binance', 'script' => 'bnc_candles_dl.php', 'period' => 3600, 'timeout' => 3900],
-    ['key' => 'binance_ticks', 'exchange' => 'binance', 'script' => 'bnc_ticks_dl.php', 'period' => 3600, 'timeout' => 3900],
+    ['key' => 'binance_ticks', 'exchange' => 'binance', 'script' => 'bnc_ticks_dl.php', 'period' => 3600, 'timeout' => 3900, 'enabled' => 0],
     ['key' => 'bitmex_candles', 'exchange' => 'bitmex', 'script' => 'bmx_candles_dl.php', 'period' => 3600, 'timeout' => 3900],
-    ['key' => 'bitmex_ticks', 'exchange' => 'bitmex', 'script' => 'bmx_ticks_dl.php', 'period' => 3600, 'timeout' => 3900],
+    ['key' => 'bitmex_ticks', 'exchange' => 'bitmex', 'script' => 'bmx_ticks_dl.php', 'period' => 3600, 'timeout' => 3900, 'enabled' => 0],
     ['key' => 'bitfinex_candles', 'exchange' => 'bitfinex', 'script' => 'bfx_candles_dl.php', 'period' => 3600, 'timeout' => 3900],
-    ['key' => 'bitfinex_ticks', 'exchange' => 'bitfinex', 'script' => 'bfx_ticks_dl.php', 'period' => 3600, 'timeout' => 3900],
+    ['key' => 'bitfinex_ticks', 'exchange' => 'bitfinex', 'script' => 'bfx_ticks_dl.php', 'period' => 3600, 'timeout' => 3900, 'enabled' => 0],
     ['key' => 'bybit_candles', 'exchange' => 'bybit', 'script' => 'bbt_candles_dl.php', 'period' => 3600, 'timeout' => 3900],
     ['key' => 'coinmarketcap_update', 'exchange' => 'meta', 'script' => 'cm_update.php', 'period' => 300, 'timeout' => 240, 'enabled' => 0],
 ];
