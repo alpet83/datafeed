@@ -1,47 +1,51 @@
 # datafeed
- Trading data accumulation and distribution scripts for several cryptoexchanges. Most of the scripts are written in PHP, interacting simultaneously with MySQL database and ClickHouse (allows for much faster access).
+Trading data accumulation and distribution scripts for several crypto exchanges. The runtime is PHP CLI centric and uses MariaDB for candle storage and metadata. ClickHouse is used for high-volume tick storage and analytics, but not every loader requires it to start.
+
+Supported exchanges in the current codebase: Binance, Bitfinex, BitMEX, Bybit.
+
+### What you need to install and configure
+Apache 2.4+ is optional for the server scripts.
+
+Runtime requirements:
+- PHP 8.4+ including CLI
+- php-mysqli
+- php-mbstring
+- php-json
+- php-bz2
+- Composer
+- MariaDB 10.6+
+- ClickHouse Server 25.3+ only if tick loaders or ClickHouse-backed analytics are used
  
- ### What you need to install and configure:
- Apache 2.4+, PHP 8.1+ including CLI and libapache2-mod, php-mysqli, php-mbstring, php-json, php-bzip, php-composer
- MariaDB 10.6+, ClickHouse Server 25.3+
- 
- External libraries must placed in same directory or /usr/share/php or /usr/local/php (means subdirectory vendor with autoload.php must in PHP include path): 
+External libraries must be placed in the same directory or in the PHP include path. In practice the repository expects `vendor/autoload.php` to be reachable during CLI execution.
+
+Required external libraries:
    *  alpet-libs-php
    *  arthurkushman/php-wss
    *  smi2/phpClickHouse          
  
  WARNING: For debugging purposes need access to /tmp and /cache folder (create it!), with free at least 10G space inside. Better using ZRAM LZ4/ZSTD disks for both, with commands like: zramctl -f && zramctl -a lz4 -s 16G /dev/zram1 && mkfs.ext4 /dev/zram1 && mount /dev/zram1 /cache
      
- NOTE: This is a draft version of the file, there will be additions 
+Operational notes:
+- Candle loaders store minute candles in `candles__<ticker>` and also rely on daily tables `candles__<ticker>__1D` for volume/control checks.
+- Tick loaders can skip their run if `CLICKHOUSE_HOST` is not configured. This is expected runtime behavior, not a fatal startup error.
+- History range can be limited with environment variables `DATAFEED_HISTORY_LIMIT_DAYS`, `DATAFEED_HISTORY_MIN_TS`, and exchange-specific variants such as `DATAFEED_HISTORY_LIMIT_DAYS_BNC`.
+- Runtime logs are written under `src/logs/` and can grow quickly during repeated loader failures.
  
  Any questions and feedback please send to project chat https://t.me/svcpool_chat
    
- # Run in Docker 
- 1. After downloading and configuring docker, install and configure containers with MariaDB Server, ClicksHouse Server.  
- 2. Configure user loader in both DB servers, create databases datafeed (better from source cm_tables.sql) and for each used exchange:
-   MariaDB:
-     `CREATE DATABASE IF NOT EXISTS binance DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;` 
-     `GRANT ALL PRIVILEGES ON binance.* TO 'loader'.'%';`
-   ClickHouse:
-     `CREATE DATABASE IF NOT EXISTS binance Engine = Atomic`  
-     `GRANT ALL PRIVILEGES ON binance.* TO 'loader';`
- 3. Change directory to datafeed after cloning this repository.
-    Run `deploy.sh` for download JPGraph library and edit `db_config.php` - specify password for MariaDB and ClickHouse connectors.
- 4. Build cointaier: `docker build --network=host -t datafeed .`
- 5. Run container with binding via screen: `screen -qdmS DFSC ./docker-run.sh`
- 6. After changing exchange configuration in tables `ticker_map`, `data_config` downloaded can be start interactive: 
-    `docker exec -it dfsc php /datafeed/src/bfx_candles_dl.php`
-    Script will work only hour, so same command can be added into crontab  
+# Run in Docker
+1. Prepare MariaDB for the exchange databases and the shared `datafeed` database.
+2. Prepare ClickHouse only if tick loaders or ClickHouse synchronization are needed.
+3. Configure `lib/db_config.php` or mount a project-specific equivalent.
+4. Build the container: `docker build --network=host -t datafeed .`
+5. Run the container: `screen -qdmS DFSC ./docker-run.sh`
+6. Start loaders explicitly, for example: `docker exec -it dfsc php /datafeed/src/bnc_candles_dl.php`
 
-## Web Configurator
+Before enabling a candle loader in cron, verify that:
+- `ticker_map` and `data_config` are filled for the target exchange
+- the target MariaDB exchange schema exists
+- the corresponding daily tables `candles__<ticker>__1D` are present and writable
 
-- Use [server/data_configurator.php](server/data_configurator.php) to edit `data_config` in browser.
-- Supported exchanges: `binance`, `bybit`, `bitfinex`, `bitmex`.
-- Preset `Apply Minimal Preset` enforces conservative defaults:
-  - enable `load_candles=1` only for pair_id `1` (BTC) and `3` (ETH)
-  - keep `load_ticks=0` for all rows
-  - keep `load_depth=0` by default
-
-This default profile reduces unnecessary market-data load for most trading setups.
+If ClickHouse is not configured, tick loaders will log a warning and exit without processing. Candle loaders still require MariaDB and their daily helper tables.
  
  
